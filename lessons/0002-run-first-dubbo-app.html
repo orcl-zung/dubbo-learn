@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 2 课：动手跑通第一个 Dubbo 应用</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/theme.js"></script>
+<script src="../assets/diagram.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/code.js" defer></script>
+</head>
+<body>
+<main>
+  <div class="lesson-kicker">第 2 课 · 地基 / 阶段一</div>
+  <h1 class="lesson-title">动手跑通第一个 Dubbo 应用</h1>
+  <p class="lesson-sub">第 1 课是地图，这节课是亲自上路。你要亲手写一个 Provider、一个 Consumer，让它们隔着 JVM 完成一次调用——有了这次体感，后面读源码才不是读天书。</p>
+
+  <div class="lesson-meta">
+    <span>⏱ 约 30–45 分钟</span>
+    <a href="../MISSION.md">使命</a>
+    <a href="0001-what-is-dubbo-rpc-architecture.html">← 第 1 课</a>
+    <a href="../reference/architecture.html">架构速查</a>
+  </div>
+
+  <div class="callout key"><span class="c-label">本课的 tangible win</span><p>启动两个进程，Consumer 终端打印出：</p>
+  <pre><code>远程调用结果: Hello, dubbo</code></pre>
+  <p>这一行，就是一次货真价实的<strong>跨进程远程方法调用</strong>——你完成了。</p></div>
+
+  <h2>为什么是三个模块</h2>
+  <p>Dubbo 是「面向接口」的 RPC：Consumer 调用的、Provider 实现的，必须是<strong>同一个接口</strong>（全限定类名完全一致）。所以接口要抽成一个共享的 jar，两端都依赖它。于是工程长这样：</p>
+  <pre><code>dubbo-learn-practice/
+├── dubbo-demo-api/         # 共享契约：DemoService 接口
+├── dubbo-demo-provider/    # 提供者：实现 + 暴露
+└── dubbo-demo-consumer/    # 消费者：注入代理 + 调用</code></pre>
+  <div class="callout note"><span class="c-label">前置条件</span><p>能跑 Java 的开发环境：具体是 <strong>JDK 17 或 21（LTS）+ Maven</strong>。本课 pom 里 <code>&lt;java.version&gt;17&lt;/java.version&gt;</code> 只是「编译目标」，<strong>在你的 JDK 21 上直接运行，无需任何改动</strong>（低版本字节码在高版本 JVM 上照跑）。还在 JDK 8？把 <code>spring-boot-starter-parent</code> 换成 <code>2.7.x</code>，Dubbo 版本不变，<strong>代码完全一样</strong>。</p></div>
+
+  <h2>先看全貌：依赖关系 &amp; 正确的建立顺序</h2>
+  <p>在贴代码前，先把三个模块的<strong>关系</strong>和<strong>怎么建</strong>讲清楚，后面才不会乱。</p>
+
+  <h3>dubbo-demo-api 是什么？——「契约 jar」</h3>
+  <p>Dubbo 是<strong>面向接口</strong>的 RPC：Consumer 持有的代理、Provider 实现的，必须是<strong>同一个接口（全限定类名完全一致）</strong>。所以这个接口要同时出现在两个进程的 classpath 上。最干净的做法——把它抽成一个独立 jar（<code>dubbo-demo-api</code>），里面<strong>只有接口、没有实现、不依赖任何东西</strong>，两头各自依赖它。这就是微服务里标准的「API 契约模块」。</p>
+
+  <pre data-nocopy><code>      dubbo-demo-provider          dubbo-demo-consumer
+              | depends on                | depends on
+              |                           |
+              +-------------+-------------+
+                            |
+                     dubbo-demo-api      (只有接口；不依赖任何东西)</code></pre>
+  <p class="arch-caption">provider 与 consumer <strong>互不依赖</strong>——它们是两个独立进程，只靠「同一个接口 + 同一个注册中心」耦合；各自还依赖 dubbo starter 与注册中心客户端。</p>
+
+  <div class="callout key"><span class="c-label">你说得对：建项目本就该 pom 先行</span><p>Maven 项目<strong>先写 pom（坐标 + parent + 依赖），再写代码</strong>。下面我把每个模块的 pom 和代码贴在一起，只是方便你对照——<strong>真正的建立顺序是 pom-first</strong>，而且有个不能跳的先后：</p></div>
+  <pre data-nocopy><code>1) dubbo-demo-api      : pom (坐标 + Java 版本) -&gt; 写 DemoService 接口
+2) mvn install         : 把 api 装进本地 Maven 仓库      (关键! 别跳)
+3) dubbo-demo-provider : pom 声明依赖 dubbo-demo-api (此刻才解析得到) -&gt; 写实现
+4) dubbo-demo-consumer : 同样 pom 先 -&gt; 写代码</code></pre>
+  <p><strong>为什么必须先 <code>mvn install</code> api？</strong>因为 provider/consumer 的 pom 写了「依赖 <code>com.example:dubbo-demo-api:1.0-SNAPSHOT</code>」，Maven 得在本地仓库里找到这个 jar 才能编译。api 没装进去，provider 一编译就报「找不到 <code>DemoService</code>」——这正是「第 3 步：跑起来」第一行先 <code>cd dubbo-demo-api &amp;&amp; mvn install</code> 的原因。</p>
+
+  <h2>第 0 步：共享契约 <code>dubbo-demo-api</code></h2>
+  <p>一个普通 Java 接口，没有任何依赖。</p>
+  <pre><code>package com.example;
+
+public interface DemoService {
+    String sayHello(String name);
+}</code></pre>
+  <p><code>dubbo-demo-api/pom.xml</code>（极简，能编译成 jar 即可）：</p>
+  <pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;project xmlns="http://maven.apache.org/POM/4.0.0"&gt;
+    &lt;modelVersion&gt;4.0.0&lt;/modelVersion&gt;
+    &lt;groupId&gt;com.example&lt;/groupId&gt;
+    &lt;artifactId&gt;dubbo-demo-api&lt;/artifactId&gt;
+    &lt;version&gt;1.0-SNAPSHOT&lt;/version&gt;
+    &lt;properties&gt;
+        &lt;maven.compiler.source&gt;17&lt;/maven.compiler.source&gt;
+        &lt;maven.compiler.target&gt;17&lt;/maven.compiler.target&gt;
+    &lt;/properties&gt;
+&lt;/project&gt;</code></pre>
+
+  <h2>第 1 步：提供者 <code>dubbo-demo-provider</code></h2>
+  <p>实现接口，用 <code>@DubboService</code> 把它暴露成 Dubbo 服务。</p>
+  <pre><code>package com.example.provider;
+
+import com.example.DemoService;
+import org.apache.dubbo.config.annotation.DubboService;
+
+@DubboService            // 关键：触发「服务暴露」并注册到注册中心
+public class DemoServiceImpl implements DemoService {
+    @Override
+    public String sayHello(String name) {
+        return "Hello, " + name;
+    }
+}</code></pre>
+  <pre><code>package com.example.provider;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class ProviderApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(ProviderApplication.class, args);
+    }
+}</code></pre>
+  <p><code>dubbo-demo-provider/src/main/resources/application.yml</code>：</p>
+  <pre><code>dubbo:
+  scan:
+    base-packages: com.example   # 扫描 @DubboService，触发服务暴露（关键！不加就不暴露）
+  application:
+    name: demo-provider
+  protocol:
+    name: dubbo          # 用 Dubbo2 协议（基于 TCP）
+    port: 20880
+  registry:
+    address: zookeeper://127.0.0.1:2181   # 注册中心</code></pre>
+  <div class="callout key"><span class="c-label">头号坑：必须开扫描，@DubboService 才会暴露</span><p>Dubbo 默认<strong>不会自动扫描</strong> <code>@DubboService</code>——必须配 <code>dubbo.scan.base-packages</code>（或在主类加 <code>@EnableDubbo</code>），Dubbo 才会把实现类注册成 ServiceBean 并暴露。否则 Provider 看着在跑、日志里却没有 <code>Export dubbo service</code>、Nacos 里也找不到，Consumer 报 No provider。<strong>本项目调试时亲历此坑。</strong></p></div>
+  <div class="callout note"><span class="c-label">两个端口别搞混</span><p>这个 Provider 其实开了<strong>两个监听端口</strong>，分属两套不同的服务：</p>
+  <ul>
+    <li><code>dubbo.protocol.port = 20880</code>：<strong>Dubbo 自己的</strong> Netty RPC 端口，<strong>真正的 RPC 流量走这里</strong>，Consumer 直连的就是它（注册到注册中心的也是这个端口）。</li>
+    <li><code>server.port = 8080</code>（默认，未显式写）：<strong>Spring Boot 的</strong>内嵌 Tomcat（HTTP）端口，给 <code>@RestController</code> 用。本课没写任何 HTTP 接口，它纯粹是为了让进程常驻而存在。</li>
+  </ul>
+  <p>一句话：<strong>Consumer 连的是 20880，跟 <code>server.port</code> 的 Tomcat 毫无关系</strong>——这正是「Dubbo 有自己的通信栈，独立于 HTTP/Tomcat」。想更干净可加 <code>spring.main.web-application-type: none</code> 关掉 Tomcat。</p></div>
+  <p><code>dubbo-demo-provider/pom.xml</code>：</p>
+  <pre><code>&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;project xmlns="http://maven.apache.org/POM/4.0.0"&gt;
+    &lt;modelVersion&gt;4.0.0&lt;/modelVersion&gt;
+    &lt;parent&gt;
+        &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+        &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+        &lt;version&gt;3.2.4&lt;/version&gt;
+    &lt;/parent&gt;
+    &lt;groupId&gt;com.example&lt;/groupId&gt;
+    &lt;artifactId&gt;dubbo-demo-provider&lt;/artifactId&gt;
+    &lt;version&gt;1.0-SNAPSHOT&lt;/version&gt;
+    &lt;properties&gt;
+        &lt;java.version&gt;17&lt;/java.version&gt;
+        &lt;dubbo.version&gt;3.3.4&lt;/dubbo.version&gt;
+    &lt;/properties&gt;
+    &lt;dependencies&gt;
+        &lt;!-- 用 web starter 让 Provider 进程常驻（Tomcat 兜底）--&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+            &lt;artifactId&gt;spring-boot-starter-web&lt;/artifactId&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.apache.dubbo&lt;/groupId&gt;
+            &lt;artifactId&gt;dubbo-spring-boot-starter&lt;/artifactId&gt;
+            &lt;version&gt;${dubbo.version}&lt;/version&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;org.apache.dubbo&lt;/groupId&gt;
+            &lt;artifactId&gt;dubbo-registry-zookeeper&lt;/artifactId&gt;
+            &lt;version&gt;${dubbo.version}&lt;/version&gt;
+        &lt;/dependency&gt;
+        &lt;dependency&gt;
+            &lt;groupId&gt;com.example&lt;/groupId&gt;
+            &lt;artifactId&gt;dubbo-demo-api&lt;/artifactId&gt;
+            &lt;version&gt;1.0-SNAPSHOT&lt;/version&gt;
+        &lt;/dependency&gt;
+    &lt;/dependencies&gt;
+&lt;/project&gt;</code></pre>
+
+  <div class="callout note"><span class="c-label">关于 dubbo.version</span><p><code>&lt;dubbo.version&gt;</code> 是<strong>我们自己定义的 Maven 属性</strong>（写在 <code>&lt;properties&gt;</code> 里），不是框架自动给的——<code>${dubbo.version}</code> 构建时被替换成这个值。取值去 <a href="https://mvnrepository.com/artifact/org.apache.dubbo/dubbo-spring-boot-starter" target="_blank" rel="noopener">Maven Central / MVNRepository</a> 查最新 3.3.x（写本课时是 <code>3.3.4</code>，你换更新的即可；也建议对齐你将来读源码的 tag）。<strong>所有 Dubbo 模块必须同一个版本</strong>，所以抽成属性一处管控。注意：Spring Boot 的 starter 由它自己的 BOM 托管、可以不写版本；但 <strong>Dubbo 不在 Spring Boot 的 BOM 里，必须显式写</strong>。（进阶：在 <code>&lt;dependencyManagement&gt;</code> 导入官方 <code>dubbo-bom</code> 后，Dubbo 模块即可省略版本。）</p></div>
+
+  <h2>第 2 步：消费者 <code>dubbo-demo-consumer</code></h2>
+  <p>用 <code>@DubboReference</code> 注入一个<strong>远程服务的本地代理</strong>，然后像调本地方法一样调它。</p>
+  <pre><code>package com.example.consumer;
+
+import com.example.DemoService;
+import org.apache.dubbo.config.annotation.DubboReference;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class ConsumerApplication implements CommandLineRunner {
+
+    @DubboReference          // 关键：注入远程服务的「代理」，背后是网络
+    private DemoService demoService;
+
+    public static void main(String[] args) {
+        SpringApplication.run(ConsumerApplication.class, args);
+    }
+
+    @Override
+    public void run(String... args) {
+        String result = demoService.sayHello("dubbo");  // 像调本地方法一样调远程
+        System.out.println("远程调用结果: " + result);
+    }
+}</code></pre>
+  <p><code>dubbo-demo-consumer/src/main/resources/application.yml</code>：</p>
+  <pre><code>dubbo:
+  application:
+    name: demo-consumer
+  registry:
+    address: zookeeper://127.0.0.1:2181   # 订阅同一个注册中心
+  consumer:
+    timeout: 3000</code></pre>
+  <div class="callout warn"><span class="c-label">Consumer 的 pom</span><p>与 Provider <strong>几乎一样</strong>，只把 <code>spring-boot-starter-web</code> 换成 <code>spring-boot-starter</code>（让 Consumer 跑完打印就退出，干净利落）。其余依赖（dubbo starter、registry-zookeeper、api）完全相同。</p></div>
+
+  <h2>第 3 步：跑起来</h2>
+  <pre><code># 0) 启动 Zookeeper（装了 Docker 就一条命令；没装见下方说明）
+docker run -d --name zk -p 2181:2181 zookeeper
+
+# 1) 把共享 api 装进本地仓库（Provider/Consumer 都依赖它）
+cd dubbo-demo-api &amp;&amp; mvn clean install
+
+# 2) 启动 Provider —— 终端 1，保持运行，看到日志稳定后别关
+cd ../dubbo-demo-provider &amp;&amp; mvn spring-boot:run
+
+# 3) 启动 Consumer —— 另开终端 2
+cd ../dubbo-demo-consumer &amp;&amp; mvn spring-boot:run</code></pre>
+  <p>Consumer 终端会打印出：</p>
+  <pre><code>远程调用结果: Hello, dubbo</code></pre>
+  <div class="callout warn"><span class="c-label">头号常见报错：No provider available</span><p>Consumer 启动时报「找不到某服务的 Provider」= <strong>此刻注册中心里没有该接口的提供者</strong>。按概率排查：①<strong>启动顺序</strong>——Provider 先起、等到日志出现 <code>Export dubbo service ...</code> 再起 Consumer；②<strong>Provider 日志确实注册成功</strong>且 Zookeeper 在跑；③<strong>接口全限定名两边一致</strong>（共享 api jar 自动一致）；④<strong>同一个 registry.address</strong>。临时绕过可设 <code>dubbo.consumer.check: false</code>，但根因仍要修。</p></div>
+  <div class="callout note"><span class="c-label">没有 Docker？</span><p>从 <a href="https://zookeeper.apache.org/releases.html" target="_blank" rel="noopener">Zookeeper 官网</a>下二进制包，解压后 <code>cp conf/zoo_sample.cfg conf/zoo.cfg &amp;&amp; ./bin/zkServer.sh start</code>。或换成 Nacos：<code>sh startup.sh -m standalone</code>，再把两处 <code>registry.address</code> 改成 <code>nacos://127.0.0.1:8848</code>、依赖换成 <code>dubbo-registry-nacos</code>。</p></div>
+
+  <h2>把这次运行对回第 1 课</h2>
+  <div data-dubbo-arch></div>
+  <p>对照上面的图，你刚刚亲手走完了真实链路：</p>
+  <ul>
+    <li><strong>Provider 启动</strong> → 步骤 0+1：暴露服务（监听 20880），并把地址注册进 Zookeeper。</li>
+    <li><strong>Consumer 启动</strong> → 步骤 2+3：向 Zookeeper 订阅，收到 Provider 的地址推送。</li>
+    <li><code>demoService.sayHello("dubbo")</code> → 步骤 4：<strong>Consumer 直连 Provider</strong>发起 RPC 调用。</li>
+    <li><code>Hello, dubbo</code> ← 这就是远程方法<strong>跨 JVM 返回</strong>的结果。</li>
+  </ul>
+  <div class="callout key"><span class="c-label">关键验证</span><p>第 1 课那句铁律——「注册中心只管地址，调用是 Consumer 直连 Provider」——你这次用真实代码验证了：Zookeeper 只是帮忙递了张地址条，真正的数据流量没经过它。</p></div>
+
+  <div class="callout note"><span class="c-label">进阶观察（可选）</span><p>想看 Zookeeper 里到底注册了什么？用 Dubbo Admin 控制台最直观；或 <code>docker exec -it zk zkCli.sh</code> 进 ZK 命令行翻节点。注意：Dubbo3 默认是<strong>应用级</strong>服务发现，节点结构与传统 2.x 的接口级不同——这正是后面「服务发现」专题要深挖的，现在先有个印象即可。</p></div>
+
+  <h2>本课练手</h2>
+  <div class="quiz" data-quiz='{"title":"第 2 课 · 检验","questions":[
+    {"q":"Provider 把服务暴露成 Dubbo 服务，靠哪个注解？","options":["@Service","@DubboService","@DubboReference","@RestController"],"answer":1,"explain":"@DubboService 标在实现类上，触发服务暴露并注册到注册中心（注意不是 Spring 的 @Service）。"},
+    {"q":"Consumer 注入远程服务的本地代理，靠哪个注解？","options":["@Autowired","@DubboService","@DubboReference","@FeignClient"],"answer":2,"explain":"@DubboReference 注入一个代理对象，方法调用会被转成网络请求。"},
+    {"q":"两端要互通，DemoService 接口必须满足什么？","options":["两边各写一份即可","同一全限定名且在共享 jar","只在 Provider 有","只在 Consumer 有"],"answer":1,"explain":"契约必须一致：同一个接口（同 FQCN）同时出现在两端 classpath，所以抽成共享 api 模块、分别依赖。"},
+    {"q":"Consumer 实际发起调用时，数据走的是？","options":["经过注册中心转发","Consumer 直连 Provider","经过 Spring 容器","经过网关"],"answer":1,"explain":"注册中心只负责地址发现；调用是 Consumer 直连 Provider——第 1 课的铁律，这次亲眼验证。"}
+  ]}'></div>
+
+  <div class="source-card">
+    <div class="sc-label">本课主源（官方）</div>
+    <div class="sc-title"><a href="https://dubbo.apache.org/zh-cn/overview/mannual/java-sdk/quickstart/" target="_blank" rel="noopener">快速入门：创建基于 Spring Boot 的 Dubbo 应用</a></div>
+    <p class="sc-note">官方原版的工程结构。跑通后回来对照一遍，确认你写的和官方一致。</p>
+  </div>
+
+  <h2>下一课预告</h2>
+  <p>你会用了。第 3 课进入<strong>阶段二</strong>，给出读源码的钥匙：<strong>Dubbo 的分层架构 + SPI 扩展机制</strong>。你会理解为什么「换协议、换注册中心、换负载均衡」在 Dubbo 里都只是换一个扩展点——而 <code>@DubboService</code>/<code>@DubboReference</code> 背后那套暴露/引用机制，也将从这一课开始有了可切入的源码坐标。</p>
+
+  <div class="lesson-ask">
+    💬 <strong>跑不通别硬扛，直接把报错贴给我。</strong>版本冲突、端口占用、Zookeeper 连不上、序列化异常……这些坑我都能帮你定位。跑通后也欢迎告诉我你看到了什么、哪里出乎意料。
+  </div>
+
+  <div class="lesson-nav">
+    <a href="0001-what-is-dubbo-rpc-architecture.html">← 第 1 课</a>
+    <a href="../reference/architecture.html">架构速查 →</a>
+  </div>
+</main>
+</body>
+</html>

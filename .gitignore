@@ -1,0 +1,31 @@
+# === Claude Code 本地数据（不提交）===
+.claude/
+
+# === Java / Maven 构建产物 ===
+target/
+build/
+out/
+*.class
+hs_err_pid*
+replay_pid*
+
+# === IDE ===
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+nbproject/private/
+nbbuild/
+nbdist/
+nb-actions.xml
+
+# === 操作系统 ===
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# === 日志 ===
+*.log
+logs/

@@ -1,0 +1,11 @@
+dubbo:
+  application:
+    name: demo-consumer
+  registry:
+#    address: zookeeper://127.0.0.1:2181   # 订阅同一个注册中心
+    address: nacos://127.0.0.1:8848   # 订阅同一个注册中心
+  consumer:
+    timeout: 3000
+
+server:
+  port: 9001

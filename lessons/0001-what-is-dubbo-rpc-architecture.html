@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 1 课：RPC 与 Dubbo——它解决什么问题，五个角色与一次调用</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/theme.js"></script>
+<script src="../assets/diagram.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/code.js" defer></script>
+</head>
+<body>
+<main>
+  <div class="lesson-kicker">第 1 课 · 地基 / 阶段一</div>
+  <h1 class="lesson-title">RPC 与 Dubbo：它解决了什么问题？</h1>
+  <p class="lesson-sub">先别碰源码。这节课把「Dubbo 到底在干嘛」变成一句话、一张图——这是后面所有源码阅读的地基。</p>
+
+  <div class="lesson-meta">
+    <span>⏱ 约 10 分钟</span>
+    <a href="../MISSION.md">使命</a>
+    <a href="../reference/glossary.html">术语表</a>
+    <a href="../reference/architecture.html">架构速查</a>
+  </div>
+
+  <h2>从一个本地方法调用说起</h2>
+  <p>你写过无数次这样的代码：</p>
+  <pre><code>// 同一个 JVM 里， userService 是个普通对象
+User user = userService.getById(1L);</code></pre>
+  <p>现在换个场景：<code>UserService</code> 的实现不在你这台机器上，而在<strong>另一台机器的另一个 JVM</strong> 里。你希望调用它的代码<strong>看起来几乎一样</strong>：</p>
+  <pre><code>@DubboReference          // 注入的是一个「代理」，背后是网络
+private UserService userService;
+
+User user = userService.getById(1L);  // 像调本地方法一样调远程</code></pre>
+
+  <div class="callout key"><span class="c-label">核心承诺</span><p><strong>RPC（Remote Procedure Call，远程过程调用）的承诺：让你像调用本地方法一样调用远程方法。</strong> 它把「序列化参数 → 网络传输 → 对端执行 → 反序列化结果」这一长串脏活全藏起来。Dubbo 就是这样一个 RPC 框架。</p></div>
+
+  <h2>那为什么不直接用 HTTP / Socket？</h2>
+  <p>因为只有「能调通」是不够的。生产环境里 Provider 不止一台、会上下线、会挂掉，你需要解决一堆新问题：</p>
+  <ul>
+    <li><strong>服务发现</strong>：Consumer 怎么知道有哪些 Provider、它们在哪些 IP 上？Provider 上下线怎么实时感知？</li>
+    <li><strong>负载均衡</strong>：多台 Provider，这次请求该打到哪一台？</li>
+    <li><strong>集群容错</strong>：某一台 Provider 挂了/超时了，怎么办？自动换一台重试？还是快速失败？</li>
+    <li><strong>可观测 / 治理</strong>：调用量、耗时、灰度路由、限流降级怎么管？</li>
+  </ul>
+  <div class="callout note"><span class="c-label">一句话定义 Dubbo</span><p>Dubbo = <strong>RPC</strong>（把远程调用做成像本地调用） + <strong>一整套服务治理能力</strong>（发现、负载均衡、容错、治理、可观测）。这些治理能力正是你将来读源码时要逐个攻克的模块。</p></div>
+
+  <h2>五个角色与一次调用</h2>
+  <p>Dubbo 经典架构里有五个角色，一次服务从启动到被调用，时序如下：</p>
+  <div data-dubbo-arch></div>
+
+  <h3>角色</h3>
+  <ul>
+    <li><strong>Container 服务容器</strong>：启动、加载、运行 Provider（Spring 体系下就是 Spring 容器）。</li>
+    <li><strong>Provider 服务提供者</strong>：暴露服务、监听端口、执行业务。</li>
+    <li><strong>Registry 注册中心</strong>：协调地址注册与发现（如 Zookeeper / Nacos）。</li>
+    <li><strong>Consumer 服务消费者</strong>：发起调用，持有远程服务的本地代理。</li>
+    <li><strong>Monitor 监控中心</strong>：统计调用次数与耗时。</li>
+  </ul>
+  <h3>时序（0 → 5）</h3>
+  <ol>
+    <li>Container 启动 Provider。</li>
+    <li>Provider 把服务地址（URL）<strong>注册</strong>到 Registry。</li>
+    <li>Consumer 向 Registry <strong>订阅</strong>所需服务。</li>
+    <li>Registry <strong>通知</strong> Consumer：把地址列表推过去，变更时实时推送。</li>
+    <li>Consumer 按负载均衡选一台 Provider <strong>直连调用</strong>；失败按容错策略重试。</li>
+    <li>Consumer 与 Provider 每<strong>分钟</strong>把统计上报到 Monitor。</li>
+  </ol>
+
+  <div class="callout key"><span class="c-label">最重要的一句话</span><p><strong>注册中心只管「地址」，真正的调用是 Consumer 直连 Provider，流量不经过注册中心。</strong> 记死这条——它是后面理解「为什么注册中心挂了已发现的地址还能用」、以及读 Cluster/LoadBalance 源码的前提。</p></div>
+
+  <p>📌 Dubbo3 还把架构抽象成「<strong>数据面</strong>（Provider+Consumer）」与「<strong>治理控制面</strong>（注册/配置/元数据中心 + Admin）」，并强调<strong>三大中心</strong>。细节放进了参考文档，需要时查：</p>
+  <div class="source-card">
+    <div class="sc-label">深入参考</div>
+    <div class="sc-title"><a href="../reference/architecture.html">Dubbo 架构与调用流程速查（含源码入口表）</a></div>
+    <p class="sc-note">两个面、三大中心、以及把每个概念对到具体源码类/方法的对照表——你的源码导航。</p>
+  </div>
+
+  <h2>本课练手</h2>
+  <p>凭记忆判断。每题点击后立刻给反馈与解析（不查文档，先考再补）。</p>
+
+  <div class="quiz" data-quiz='{"title":"第 1 课 · 检验","questions":[
+    {"q":"服务提供者（Provider）启动后，第一步把自己的服务地址注册给谁？","options":["注册中心","监控中心","配置中心","元数据中心"],"answer":0,"explain":"注册中心负责协调地址的注册与发现；监控中心只管统计，配置/元数据中心另有职责。"},
+    {"q":"消费者（Consumer）怎么知道提供者在哪台机器上？","options":["写死 IP 配置","从注册中心订阅地址","广播询问所有节点","查本地缓存文件"],"answer":1,"explain":"Dubbo 是 Client-Based 服务发现：Consumer 从注册中心订阅，地址变更时实时推送。"},
+    {"q":"Consumer 实际调用 Provider 时，流量经过注册中心吗？","options":["经过注册中心转发","不经过，Consumer 直连 Provider","必须经过 Monitor","取决于协议配置"],"answer":1,"explain":"注册中心只管地址发现；真正调用是 Consumer 直连 Provider，流量不经过注册中心。"},
+    {"q":"调用失败后，Dubbo 默认的容错（Failover 重试）发生在哪一端？","options":["提供者端","消费者端","注册中心","监控中心"],"answer":1,"explain":"集群容错在 Consumer 端：从地址列表里重选一个 Provider 重试（阶段三会进源码细看）。"}
+  ]}'></div>
+
+  <div class="source-card">
+    <div class="sc-label">本课主源（官方）</div>
+    <div class="sc-title"><a href="https://dubbo.apache.org/zh-cn/overview/what/overview/" target="_blank" rel="noopener">了解 Dubbo 核心概念和架构</a></div>
+    <p class="sc-note">读完这页，确认你对「数据面 / 治理控制面、服务开发框架、通信协议」的理解与课堂一致。约 5 分钟。</p>
+  </div>
+
+  <h2>下一课预告</h2>
+  <p>概念清楚了，但「眼见为实」。<strong>第 2 课</strong>我们会动手：用 Spring Boot 写一个 Dubbo3 的 Provider + Consumer + 注册中心，真正跑通一次远程调用——有了这次「会用」的体感，后面读服务暴露/引用源码才不会读天书。</p>
+
+  <div class="lesson-ask">
+    💬 <strong>有疑问就问我。</strong>这节课里任何一处——比如「为什么注册中心挂了还能调用」「URL 到底长什么样」「Spring Cloud 和 Dubbo 啥区别」——都可以直接问。我是你的老师，随时可以打断。
+  </div>
+
+  <div class="lesson-nav">
+    <a href="../reference/glossary.html">← 术语表</a>
+    <a href="0002-run-first-dubbo-app.html">第 2 课：动手跑通第一个 Dubbo 应用 →</a>
+  </div>
+</main>
+</body>
+</html>

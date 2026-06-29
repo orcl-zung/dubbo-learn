@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dubbo 核心术语表 · dubbo-learn</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/theme.js"></script>
+<script src="../assets/code.js" defer></script>
+</head>
+<body>
+<main>
+  <div class="lesson-kicker">参考文档 · Reference</div>
+  <h1 class="lesson-title">Dubbo 核心术语表</h1>
+  <p class="lesson-sub">每节课都会遵循这张表的定义。术语是地图，先把地名记住，读源码才不会迷路。</p>
+
+  <div class="lesson-meta">
+    <span>共 24 条</span>
+    <a href="architecture.html">→ 架构与调用流程速查</a>
+    <a href="../lessons/0001-what-is-dubbo-rpc-architecture.html">← 回到第 1 课</a>
+  </div>
+
+  <h2>角色与部署</h2>
+
+  <div class="term-block"><p class="t-term">Provider<span class="t-en">服务提供者</span></p>
+    <p class="t-def">暴露并对外提供 RPC 服务的 Dubbo 进程，监听端口、接收调用、执行业务逻辑。</p></div>
+
+  <div class="term-block"><p class="t-term">Consumer<span class="t-en">服务消费者</span></p>
+    <p class="t-def">发起 RPC 调用的 Dubbo 进程。持有远程服务的本地代理，像调本地方法一样调远程。</p></div>
+
+  <div class="term-block"><p class="t-term">Registry<span class="t-en">注册中心</span></p>
+    <p class="t-def">协调服务地址注册与发现的中心组件。Provider 注册地址，Consumer 订阅地址，变更时推送。常用 Zookeeper / Nacos。</p></div>
+
+  <div class="term-block"><p class="t-term">Monitor<span class="t-en">监控中心</span></p>
+    <p class="t-def">统计 Consumer 与 Provider 的调用次数、耗时等指标，每分钟上报一次，用于可观测。</p></div>
+
+  <div class="term-block"><p class="t-term">Container<span class="t-en">服务容器</span></p>
+    <p class="t-def">负责启动、加载、运行 Provider。在 Spring 体系里通常就是 Spring 容器。</p></div>
+
+  <div class="callout key"><span class="c-label">三大中心</span><p>Dubbo3 传统部署中的中心化组件：<strong>注册中心</strong>（地址发现）、<strong>配置中心</strong>（全局配置 + 治理规则）、<strong>元数据中心</strong>（接口元数据）。三者<strong>都不是必须的</strong>，但通常至少有一个注册中心。</p></div>
+
+  <h2>核心动作</h2>
+
+  <div class="term-block"><p class="t-term">服务暴露 Export<span class="t-en">Provider 端动作</span></p>
+    <p class="t-def">Provider 启动时，把服务以本地（Injvm）和远程两种方式暴露成 <code>Invoker</code>，并注册到注册中心。源码入口：<code>ServiceConfig#export</code>。</p></div>
+
+  <div class="term-block"><p class="t-term">服务引用 Refer<span class="t-en">Consumer 端动作</span></p>
+    <p class="t-def">Consumer 启动时，从注册中心订阅地址，为远程接口生成代理对象注入业务代码。源码入口：<code>ReferenceConfig#get</code>。</p></div>
+
+  <div class="term-block"><p class="t-term">Invoker<span class="t-en">可执行体</span></p>
+    <p class="t-def">Dubbo 的核心抽象：一个「可被调用的实体」。物理Invoker 跑网络，Mock/Local Invoker 不跑。调用链就是层层 Invoker 包装。</p></div>
+
+  <div class="term-block"><p class="t-term">服务发现 Service Discovery<span class="t-en">地址发现</span></p>
+    <p class="t-def">Consumer 自动获取 Provider 地址列表的能力。Dubbo3 采用<strong>应用级</strong>模型（应用→实例列表），区别于 Dubbo2 的<strong>接口级</strong>（接口→实例列表）。</p></div>
+
+  <h2>扩展与协议</h2>
+
+  <div class="term-block"><p class="t-term">SPI / 扩展点<span class="t-en">Service Provider Interface</span></p>
+    <p class="t-def">Dubbo 的灵魂机制：把协议、注册中心、负载均衡等全部做成可插拔扩展点。比 Java SPI 更强（按名加载、按需实例化、自适应）。源码核心：<code>ExtensionLoader</code>。</p></div>
+
+  <div class="term-block"><p class="t-term">自适应扩展 Adaptive<span class="t-en">运行时决策</span></p>
+    <p class="t-def">一种特殊扩展：在调用时根据 URL 参数动态决定用哪个实现。是理解 Dubbo「面向接口 + URL 总线」设计的关键。</p></div>
+
+  <div class="term-block"><p class="t-term">URL<span class="t-en">配置总线</span></p>
+    <p class="t-def">Dubbo 内部贯穿一切的数据结构（<code>dubbo://...?key=value</code>）。扩展点的选择、参数传递都依赖它。<strong>URL 是 Dubbo 的血液。</strong></p></div>
+
+  <div class="term-block"><p class="t-term">Protocol<span class="t-en">协议</span></p>
+    <p class="t-def">定义「如何暴露服务、如何引用服务、如何通信」。内置 <code>Dubbo2</code>（TCP 二进制）与 <code>Triple</code>（HTTP/2，兼容 gRPC）。</p></div>
+
+  <div class="term-block"><p class="t-term">Triple 协议<span class="t-en">Dubbo3 主推</span></p>
+    <p class="t-def">基于 HTTP/2 构建，完全兼容 gRPC，支持一元调用与三种流式通信。是 Dubbo3 云原生的基石。</p></div>
+
+  <div class="term-block"><p class="t-term">Filter<span class="t-en">过滤器</span></p>
+    <p class="t-def">调用链上的拦截器（类似 Servlet Filter）。监控、限流、日志、权限都做成 Filter，链式执行。</p></div>
+
+  <div class="term-block"><p class="t-term">序列化 Serialization<span class="t-en">编解码</span></p>
+    <p class="t-def">把方法参数/返回值转成字节流。Dubbo 不绑定序列化，支持 Hessian2、Fastjson2、Kryo、Protobuf 等。</p></div>
+
+  <h2>集群与容错</h2>
+
+  <div class="term-block"><p class="t-term">Cluster<span class="t-en">集群</span></p>
+    <p class="t-def">Consumer 侧的抽象：把多个 Provider Invoker 伪装成一个，并叠加容错策略。源码：<code>Cluster</code> / <code>FailoverClusterInvoker</code>。</p></div>
+
+  <div class="term-block"><p class="t-term">集群容错策略<span class="t-en">Failover / Failfast ...</span></p>
+    <p class="t-def">调用失败时怎么办。默认 <code>Failover</code>（失败自动切换重试）；还有 Failfast、Failsafe、Failback、Forking、Broadcast。</p></div>
+
+  <div class="term-block"><p class="t-term">LoadBalance<span class="t-en">负载均衡</span></p>
+    <p class="t-def">从多个 Provider 里选一个调用。内置 Random、RoundRobin、LeastActive、ConsistentHash、ShortestResponse 等。源码：<code>LoadBalance</code>。</p></div>
+
+  <div class="term-block"><p class="t-term">Router<span class="t-en">路由</span></p>
+    <p class="t-def">在负载均衡之前，先按规则（条件、标签、脚本）筛选出一组合法的 Provider，实现灰度、同区域优先等。</p></div>
+
+  <h2>调用方式</h2>
+
+  <div class="term-block"><p class="t-term">泛化调用 Generic<span class="t-en">无接口调用</span></p>
+    <p class="t-def">不依赖 Provider 的接口 SDK，用 <code>GenericService</code> 以方法名+参数发起调用。网关、测试平台常用。</p></div>
+
+  <div class="term-block"><p class="t-term">直连<span class="t-en">点对点</span></p>
+    <p class="t-def">不经过注册中心，Consumer 直接配置 Provider 的 IP:端口调用。调试或不需要服务发现时用。</p></div>
+
+  <div class="callout note"><span class="c-label">为什么先记术语</span><p>这张表对应你源码之旅的每一站。当某节课深入某个机制时，回到这里确认它的定义与边界——避免把「服务暴露」和「服务注册」混为一谈这类常见错误。</p></div>
+
+  <div class="lesson-nav">
+    <span></span>
+    <a href="architecture.html">架构与调用流程速查 →</a>
+  </div>
+</main>
+</body>
+</html>

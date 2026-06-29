@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dubbo 架构与调用流程速查 · dubbo-learn</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/theme.js"></script>
+<script src="../assets/diagram.js" defer></script>
+<script src="../assets/code.js" defer></script>
+</head>
+<body>
+<main>
+  <div class="lesson-kicker">参考文档 · Reference</div>
+  <h1 class="lesson-title">Dubbo 架构与调用流程速查</h1>
+  <p class="lesson-sub">一张图 + 一张「源码入口」表，把概念坐标和源码坐标对齐——这是你源码之旅的导航。</p>
+
+  <div class="lesson-meta">
+    <a href="glossary.html">← 术语表</a>
+    <a href="https://dubbo.apache.org/zh-cn/overview/what/architecture/" target="_blank" rel="noopener">官方原文 ↗</a>
+    <a href="../lessons/0001-what-is-dubbo-rpc-architecture.html">← 回到第 1 课</a>
+  </div>
+
+  <h2>经典五角色与调用流程</h2>
+  <div data-dubbo-arch></div>
+  <p class="arch-caption">来源：Apache Dubbo 官方工作原理图（重绘）。0–5 为一次完整服务的生命周期时序。</p>
+
+  <h3>六步时序</h3>
+  <ol>
+    <li><strong>启动</strong>：Container 启动、加载并运行 Provider。</li>
+    <li><strong>注册</strong>：Provider 启动时把自己的服务地址（URL）注册到 Registry。</li>
+    <li><strong>订阅</strong>：Consumer 启动时向 Registry 订阅所需服务。</li>
+    <li><strong>通知</strong>：Registry 把 Provider 地址列表推给 Consumer，地址变更时基于长连接实时推送。</li>
+    <li><strong>调用</strong>：Consumer 从地址列表中按负载均衡算法选一台 Provider 发起调用；失败则按容错策略重试。</li>
+    <li><strong>统计</strong>：Consumer 与 Provider 在内存累计调用次数/耗时，每分钟上报一次到 Monitor。</li>
+  </ol>
+
+  <div class="callout key"><span class="c-label">关键认知</span><p>注册中心只管「地址」，调用是 Consumer <strong>直连</strong> Provider 的——流量不经过注册中心。所以注册中心挂了，已发现的地址仍能继续调用（只是无法感知新变更）。这条会被反复考到。</p></div>
+
+  <h2>两个面（Dubbo3 抽象）</h2>
+  <table class="grid">
+    <tr><th>面</th><th>是什么</th><th>包含</th></tr>
+    <tr><td><strong>数据面</strong></td><td>集群里所有跑业务的 Dubbo 进程</td><td>Provider + Consumer（通过 RPC 协议交换数据）</td></tr>
+    <tr><td><strong>治理控制面</strong></td><td>协调、管控这些进程的抽象层</td><td>注册中心、配置中心、元数据中心、流量管控、Admin 控制台（Mesh 场景含 Istio）</td></tr>
+  </table>
+
+  <h2>三大中心职责</h2>
+  <table class="grid">
+    <tr><th>中心</th><th>核心职责</th></tr>
+    <tr><td><strong>注册中心</strong></td><td>地址注册与发现（Consumer↔Provider）。Client-Based 模式。</td></tr>
+    <tr><td><strong>配置中心</strong></td><td>① 启动期全局配置（跨环境一致）② 治理规则（路由、动态配置）的存储与推送。</td></tr>
+    <tr><td><strong>元数据中心</strong></td><td>① 接收 Provider 的接口元数据（供 Admin 服务测试/文档）② 作为应用级服务发现的补充。</td></tr>
+  </table>
+  <div class="callout note"><span class="c-label">默认行为</span><p>若不单独部署配置/元数据中心，Dubbo 会默认把注册中心实例同时当作配置中心与元数据中心（可用 <code>use-as-config-center</code> / <code>use-as-metadata-center</code> 关闭）。</p></div>
+
+  <h2>源码入口对照表（本项目的核心地图）</h2>
+  <p>这张表把每个概念对到 Dubbo 源码里的类/方法——读源码时按此定位。版本以 Dubbo 3.x 为准。</p>
+  <table class="grid">
+    <tr><th>概念</th><th>源码入口</th><th>所在模块</th></tr>
+    <tr><td>扩展加载（SPI）</td><td><code>ExtensionLoader#getExtension</code> / <code>#getAdaptiveExtension</code></td><td>dubbo-common</td></tr>
+    <tr><td>服务暴露</td><td><code>ServiceConfig#export</code> → <code>Protocol#export</code></td><td>dubbo-config</td></tr>
+    <tr><td>服务引用</td><td><code>ReferenceConfig#get</code> → <code>Protocol#refer</code></td><td>dubbo-config</td></tr>
+    <tr><td>调用入口（Consumer 代理）</td><td><code>InvokerInvocationHandler#invoke</code></td><td>dubbo-rpc-api</td></tr>
+    <tr><td>集群容错</td><td><code>Cluster</code> / <code>FailoverClusterInvoker#doInvoke</code></td><td>dubbo-cluster</td></tr>
+    <tr><td>负载均衡</td><td><code>LoadBalance</code> / <code>AbstractLoadBalance#select</code></td><td>dubbo-cluster</td></tr>
+    <tr><td>路由筛选</td><td><code>Router</code> / <code>RouterChain#route</code></td><td>dubbo-cluster</td></tr>
+    <tr><td>协议（Dubbo2 / Triple）</td><td><code>Protocol</code>：<code>DubboProtocol</code> / <code>TripleProtocol</code></td><td>dubbo-rpc-*</td></tr>
+    <tr><td>注册中心</td><td><code>Registry</code> / <code>RegistryFactory</code>（Zookeeper / Nacos 实现）</td><td>dubbo-registry-*</td></tr>
+    <tr><td>远程通信</td><td><code>ExchangeClient</code> / <code>HeaderExchangeServer</code>（Netty）</td><td>dubbo-remoting-*</td></tr>
+  </table>
+  <div class="callout warn"><span class="c-label">提醒</span><p>入口会随大版本（3.1 / 3.2 / 3.3）微调，以上是主干。读源码时以你 clone 的实际 tag 为准，本表用于「知道该去哪个包找」。</p></div>
+
+  <h2>同层对照：Dubbo vs Spring Cloud OpenFeign</h2>
+  <p>真正公平的对比是 <strong>Dubbo ↔ OpenFeign</strong>（Spring Cloud 里负责「把远程调用封装成接口」的那块），而不是 Dubbo ↔ 整个 Spring Cloud 生态。编程模型上二者已趋同：都是「接口 + 动态代理，像调本地方法」。</p>
+  <table class="grid">
+    <tr><th>维度</th><th>Dubbo</th><th>OpenFeign</th></tr>
+    <tr><td>是什么</td><td>完整 RPC 框架（provider + consumer，通信+治理一体）</td><td><strong>仅 consumer 侧</strong>声明式 HTTP 客户端</td></tr>
+    <tr><td>传输协议</td><td>TCP/二进制（Dubbo2）、HTTP/2（Triple）</td><td>HTTP/REST（JSON 文本）</td></tr>
+    <tr><td>provider 侧</td><td>一等公民：暴露服务、监听、注册</td><td>没有，对端是普通 <code>@RestController</code></td></tr>
+    <tr><td>负载均衡</td><td>自带 <code>LoadBalance</code> SPI</td><td>借 Spring Cloud LoadBalancer（原 Ribbon）</td></tr>
+    <tr><td>服务发现</td><td>自带注册中心抽象</td><td>借 Spring Cloud 注册中心组件</td></tr>
+    <tr><td>容错/熔断</td><td>自带集群容错（Failover…）</td><td>借 Resilience4j / Sentinel</td></tr>
+    <tr><td>性能</td><td>高（长连接、二进制）</td><td>低一截（HTTP 文本开销）</td></tr>
+  </table>
+  <div class="callout key"><span class="c-label">一句话本质</span><p><strong>OpenFeign 是「拼装体系」里的一块零件</strong>（只管 接口→代理→HTTP，其余能力靠兄弟组件借）；<strong>Dubbo 是「端到端自研」</strong>（provider、consumer、传输、发现、负载、容错全内置、靠 SPI 串成一体）。差异收敛成三点：传输方式（RPC vs HTTP）、集成度（一体 vs 拼装）、provider 侧是否一等公民。</p></div>
+  <div class="callout note"><span class="c-label">读源码的锚点</span><p>Consumer 侧二者结构对称——都是「接口 → 动态代理 → 调用处理器」：</p>
+  <pre><code>@FeignClient 接口 → FeignClientFactoryBean → JDK 动态代理 → InvocationHandler → HTTP
+@DubboReference    → ReferenceConfig          → 代理(ProxyFactory) → InvokerInvocationHandler → Invoker 链 → 通信</code></pre>
+  <p>区别在代理背后：OpenFeign 直接拼 HTTP；Dubbo 走 <code>Invoker 链 → Cluster → LoadBalance → Protocol → Remoting</code>。记住这条对应，将来读 <code>InvokerInvocationHandler</code> 就不会陌生。</p></div>
+
+  <div class="lesson-nav">
+    <a href="glossary.html">← 术语表</a>
+    <a href="../lessons/0001-what-is-dubbo-rpc-architecture.html">← 回到第 1 课</a>
+  </div>
+</main>
+</body>
+</html>
