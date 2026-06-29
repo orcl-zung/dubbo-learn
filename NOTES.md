@@ -30,3 +30,4 @@
 - 2026-06-29：架构速查补充「Dubbo vs OpenFeign」同层对照；交付第 2 课（动手跑通 Spring Boot + Zookeeper 三模块工程）。技术选型：Dubbo 3.3.0 + Spring Boot 3.2.4 + JDK 17 + Zookeeper(Docker)，附 Java8/SB2.7、Nacos、无 Docker 三种 fallback。下一课（第 3 课）= 阶段二开篇：分层架构 + SPI 扩展机制。
 - 2026-06-29（深夜调试）：用户用 Nacos 跑第 2 课，连环踩坑已逐一定位并修复——① registry scheme 写成 `8848://`（应为 `nacos://`）；② 协议端口 20880 被另一 provider(power-bank-ultimate) 占用 → 换 20881；③ **头号坑：`@DubboService` 不暴露，因未配 `dubbo.scan.base-packages`**（已加；详见 learning-records/0002）。已在用户工程与第 2 课同步修复。
 - 2026-06-29：✅ **跑通！** Consumer 打印 `RPC response result: Hello dubbo`。**阶段一（地基 + 会用）达成**，MISSION 第一段通关。下一步：第 3 课《分层架构 + SPI 扩展机制》（阶段二开篇）。
+- 2026-06-29：交付第 3 课《分层架构 + SPI》——十层架构图（layer-stack 组件，已加进 style.css）+ 各层源码模块对照（闭环到第 2 课调试日志）+ SPI 机制（Java SPI 对比、约定、LoadBalance 真实配置示例）。第 2 课页脚已接第 3 课。下一步：第 4 课钻进 ExtensionLoader 源码 + 自己写一个 SPI 扩展。

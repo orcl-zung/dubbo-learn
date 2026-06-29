@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 3 课：Dubbo 分层架构 + SPI 扩展机制</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/theme.js"></script>
+<script src="../assets/code.js" defer></script>
+</head>
+<body>
+<main>
+  <div class="lesson-kicker">第 3 课 · 阶段二开篇</div>
+  <h1 class="lesson-title">分层架构 + SPI：读源码的地图与钥匙</h1>
+  <p class="lesson-sub">你跑通 demo 时日志里冒出一堆类名——ServiceConfig、RegistryProtocol、DubboProtocol、NacosRegistry、ServiceAnnotationBeanPostProcessor……它们到底散落在哪儿？这节课给你两张图：一张「地图」（十层架构），一把「钥匙」（SPI 扩展机制）。</p>
+
+  <div class="lesson-meta">
+    <span>⏱ 约 15 分钟</span>
+    <a href="0002-run-first-dubbo-app.html">← 第 2 课</a>
+    <a href="../reference/glossary.html">术语表</a>
+    <a href="../reference/architecture.html">架构速查</a>
+  </div>
+
+  <h2>Part A：十层架构——源码的地图</h2>
+  <p>Dubbo 是个大框架（几十个模块）。它靠<strong>分层</strong>来组织复杂度：每一层只做一件事，上层调用下层，单向依赖、互不穿透。记住一句话——<strong>「分而治之，向下依赖」</strong>。</p>
+
+  <div class="layer-stack">
+    <div class="layer-group">
+      <h4>业务层 · Business</h4>
+      <ul><li><b>Service</b> 服务接口层：开发者写的业务接口与实现（你的 <code>DemoServiceImpl</code>）</li></ul>
+    </div>
+    <div class="layer-group rpc">
+      <h4>RPC 层 · Dubbo 的核心（6 层）</h4>
+      <ul>
+        <li><b>Config</b> 配置层：解析 <code>ServiceConfig</code> / <code>ReferenceConfig</code></li>
+        <li><b>Proxy</b> 代理层：生成 Consumer 的远程代理、Provider 的 Invoker</li>
+        <li><b>Registry</b> 注册层：服务注册与发现（你用的 Nacos 就在这层）</li>
+        <li><b>Cluster</b> 集群层：多 Provider 的<strong>路由 / 负载均衡 / 容错</strong></li>
+        <li><b>Monitor</b> 监控层：调用次数与耗时统计</li>
+        <li><b>Protocol</b> 协议层：封装「如何暴露、如何调用」（Dubbo 协议 / Triple）</li>
+      </ul>
+    </div>
+    <div class="layer-group">
+      <h4>Remoting 层 · 远程通信（3 层）</h4>
+      <ul>
+        <li><b>Exchange</b> 信息交换层：封装「请求-响应」语义</li>
+        <li><b>Transport</b> 网络传输层：抽象 Netty 等 NIO 框架</li>
+        <li><b>Serialize</b> 序列化层：Hessian2 / Fastjson2 / Protobuf</li>
+      </ul>
+    </div>
+  </div>
+
+  <p>把每层对到源码模块，你就能在几十个 jar 里精准定位：</p>
+  <table class="grid">
+    <tr><th>层</th><th>职责</th><th>源码模块 / 关键类（你调试时见过的）</th></tr>
+    <tr><td><b>Config</b></td><td>配置解析、触发暴露/引用</td><td>dubbo-config · <code>ServiceConfig#export</code>、<code>ReferenceConfig#get</code></td></tr>
+    <tr><td><b>Proxy</b></td><td>生成代理</td><td>dubbo-rpc-api · <code>ProxyFactory</code>、<code>InvokerInvocationHandler</code></td></tr>
+    <tr><td><b>Registry</b></td><td>注册与订阅</td><td>dubbo-registry · <code>NacosRegistry</code>、<code>RegistryProtocol</code></td></tr>
+    <tr><td><b>Cluster</b></td><td>路由/负载/容错</td><td>dubbo-cluster · <code>FailoverClusterInvoker</code>、<code>LoadBalance</code>、<code>Router</code></td></tr>
+    <tr><td><b>Protocol</b></td><td>调用与暴露</td><td>dubbo-rpc-* · <code>DubboProtocol</code>、<code>TripleProtocol</code></td></tr>
+    <tr><td><b>Transport</b></td><td>网络收发</td><td>dubbo-remoting-netty4 · Netty 服务器/客户端</td></tr>
+    <tr><td><b>Serialize</b></td><td>编解码</td><td>dubbo-serialization · <code>Serialization</code></td></tr>
+  </table>
+  <div class="callout key"><span class="c-label">闭环</span><p>你第 2 课调试时打印的 <code>Register ServiceBean</code> → Config 层；<code>Export dubbo service</code> → Protocol 层；<code>Register ... to registry nacos://</code> → Registry 层。现在这些日志都有「家」了。</p></div>
+
+  <h2>Part B：SPI 扩展机制——可插拔的钥匙</h2>
+  <p>看上面的表你会发现：<strong>Protocol、Registry、LoadBalance、Serialization……几乎每一层的关键接口都是「可换」的</strong>。Dubbo 靠什么做到「换协议只改一行配置」？答案就是 <strong>SPI</strong>。</p>
+
+  <p><strong>SPI（Service Provider Interface）一句话：把「接口」和「实现」解耦，实现类的全限定名写在配置文件里，运行时按需加载。</strong></p>
+
+  <h3>为什么不直接用 Java 自带的 SPI？</h3>
+  <table class="grid">
+    <tr><th>维度</th><th>Java SPI（<code>ServiceLoader</code>）</th><th>Dubbo SPI（<code>ExtensionLoader</code>）</th></tr>
+    <tr><td>加载</td><td>一次性<strong>全量</strong>实例化所有实现</td><td><strong>按需</strong>、按 key 加载</td></tr>
+    <tr><td>取实现</td><td>只能遍历，无法按名取</td><td><code>getExtension("random")</code> 按名直取</td></tr>
+    <tr><td>IOC 注入</td><td>无</td><td>有（setter 注入其他扩展）</td></tr>
+    <tr><td>AOP 包装</td><td>无</td><td>有（Wrapper 装饰，如 Filter 链）</td></tr>
+    <tr><td>自适应</td><td>无</td><td>有（<code>@Adaptive</code>，按 URL 参数运行时选）</td></tr>
+  </table>
+  <p>正因 Java SPI「全量加载 + 不能按名取 + 无注入/包装/自适应」，Dubbo 才自己造了一套更强的。</p>
+
+  <h3>Dubbo SPI 的约定（背下来）</h3>
+  <ol>
+    <li>扩展接口上标 <code>@SPI</code>（如 <code>Protocol</code>、<code>LoadBalance</code>）。</li>
+    <li>实现配置在 <code>META-INF/dubbo/&lt;接口全限定名&gt;</code> 文件里，格式 <code>key=实现类全限定名</code>。</li>
+    <li>每个 <code>@SPI</code> 接口对应一个 <code>ExtensionLoader</code> 实例，负责加载/缓存/注入。</li>
+  </ol>
+
+  <p>看个真实的——Dubbo 源码里 <strong>LoadBalance</strong> 的 SPI 配置文件（你能在 dubbo-cluster jar 里找到它）：</p>
+  <pre><code># 文件：META-INF/dubbo/org.apache.dubbo.rpc.cluster.LoadBalance
+random=org.apache.dubbo.rpc.cluster.loadbalance.RandomLoadBalance
+roundrobin=org.apache.dubbo.rpc.cluster.loadbalance.RoundRobinLoadBalance
+leastactive=org.apache.dubbo.rpc.cluster.loadbalance.LeastActiveLoadBalance
+consistenthash=org.apache.dubbo.rpc.cluster.loadbalance.ConsistentHashLoadBalance
+shortestresponse=org.apache.dubbo.rpc.cluster.loadbalance.ShortestResponseLoadBalance</code></pre>
+  <div class="callout key"><span class="c-label">这就是「换负载均衡只改一个 key」</span><p>当你配置 <code>dubbo.consumer.loadbalance=random</code>，Dubbo 就调用 <code>ExtensionLoader.getExtensionLoader(LoadBalance.class).getExtension("random")</code>，拿到 <code>RandomLoadBalance</code>。<strong>换策略 = 换一个 key</strong>，框架代码一行都不用动。换协议（<code>dubbo.protocol.name</code>）、换注册中心（<code>registry</code> 的 scheme）同理——全是在选 SPI 扩展点。</p></div>
+
+  <div class="callout note"><span class="c-label">三个增强，先有印象</span><p>Dubbo SPI 还有三招，下节课细讲源码：① <strong>IOC</strong>——扩展的 setter 会被自动注入其它扩展；② <strong>AOP/Wrapper</strong>——用包装类包一层（Filter 链就是这么来的）；③ <strong>@Adaptive 自适应</strong>——一个「根据 URL 参数临时决定用哪个实现」的动态扩展（这是理解 Dubbo「面向接口 + URL 总线」的关键）。</p></div>
+
+  <h2>本课练手</h2>
+  <div class="quiz" data-quiz='{"title":"第 3 课 · 检验","questions":[
+    {"q":"你跑 demo 时用到的 ServiceConfig / ReferenceConfig 属于哪一层？","options":["Proxy 代理层","Config 配置层","Registry 注册层","Protocol 协议层"],"answer":1,"explain":"Config 层负责解析配置并触发暴露(ServiceConfig#export)/引用(ReferenceConfig#get)。"},
+    {"q":"Failover 容错、负载均衡、路由规则，统一在哪个层处理？","options":["Registry 注册层","Protocol 协议层","Cluster 集群层","Transport 传输层"],"answer":2,"explain":"Cluster 层把多个 Provider 封装成一个，叠加路由、负载均衡、容错（Failover 等）。"},
+    {"q":"把注册中心从 Zookeeper 换成 Nacos，本质上是？","options":["改了网络传输层","换了一个 Registry 的 SPI 扩展实现","改了序列化方式","换了 Cluster 策略"],"answer":1,"explain":"Registry 是 @SPI 接口，Zookeeper/Nacos 是它的两个扩展实现。registry scheme 决定加载哪个。"},
+    {"q":"Dubbo 不用 Java SPI，最主要是因为 Java SPI？","options":["只能用一次","一次性全量加载、不能按名取、无注入/包装/自适应","不支持接口","性能太差无法使用"],"answer":1,"explain":"Java SPI 全量实例化、无法按 key 取、缺 IOC/AOP/自适应，满足不了 Dubbo 的可插拔需求。"}
+  ]}'></div>
+
+  <div class="source-card">
+    <div class="sc-label">本课主源（官方）</div>
+    <div class="sc-title"><a href="https://dubbo.apache.org/zh-cn/overview/mannual/java-sdk/reference-manual/architecture/code-architecture/" target="_blank" rel="noopener">代码架构（十层）</a> · <a href="https://dubbo.apache.org/zh-cn/overview/mannual/java-sdk/reference-manual/architecture/dubbo-spi/" target="_blank" rel="noopener">Dubbo SPI 扩展点指南</a></div>
+    <p class="sc-note">先读「代码架构」对上十层分组，再读 SPI 指南。想看全部内置扩展点，查 <a href="https://dubbo.apache.org/zh-cn/overview/mannual/java-sdk/reference-manual/spi/spi-list/" target="_blank" rel="noopener">SPI 插件列表</a>。</p>
+  </div>
+
+  <h2>下一课预告</h2>
+  <p>地图和钥匙到手了。第 4 课我们<strong>钻进 SPI 源码</strong>：跟着 <code>ExtensionLoader</code> 看扩展是怎么被加载、缓存、注入的，搞懂 <code>@Adaptive</code> 自适应扩展到底生成了什么类——并且<strong>自己动手写一个 SPI 扩展</strong>（比如一个自定义负载均衡）跑起来。从「会用」正式跨进「能读源码」。</p>
+
+  <div class="lesson-ask">
+    💬 <strong>这节概念密度大，随时打断。</strong>比如「Wrapper/AOP 到底怎么包的」「@Adaptive 编译出的类长什么样」「十层里有没有哪层不理解」，直接问。能复述出「换协议=换 SPI 扩展」就算这课通了。
+  </div>
+
+  <div class="lesson-nav">
+    <a href="0002-run-first-dubbo-app.html">← 第 2 课</a>
+    <a href="../reference/architecture.html">架构速查 →</a>
+  </div>
+</main>
+</body>
+</html>

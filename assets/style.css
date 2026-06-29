@@ -274,6 +274,37 @@ pre:hover .copy-btn,
   margin-top: .5rem;
 }
 
+/* ---------- 分层架构图 ---------- */
+.layer-stack { margin: 1.6rem 0; }
+.layer-group {
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  margin-bottom: .8rem;
+  overflow: hidden;
+  background: var(--surface);
+}
+.layer-group > h4 {
+  margin: 0;
+  padding: .5rem .9rem;
+  font-family: var(--sans);
+  font-size: .76rem;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  background: var(--code-bg);
+  color: var(--ink-soft);
+  border-bottom: 1px solid var(--rule);
+}
+.layer-group.rpc > h4 { color: var(--accent); }
+.layer-group > ul { list-style: none; margin: 0; padding: .2rem .9rem .4rem; }
+.layer-group > ul > li {
+  padding: .3rem 0;
+  border-bottom: 1px dashed var(--rule);
+  font-size: .92rem;
+  line-height: 1.45;
+}
+.layer-group > ul > li:last-child { border-bottom: none; }
+.layer-group > ul > li b { font-family: var(--sans); font-weight: 700; color: var(--ink); margin-right: .15rem; }
+
 /* ---------- 测验 ---------- */
 .quiz {
   margin: 2rem 0;
