@@ -1,0 +1,5 @@
+# 第 4 课练手：把我们的自定义负载均衡注册成 LoadBalance 的一个 SPI 扩展。
+# 文件名 = 扩展接口的全限定名（org.apache.dubbo.rpc.cluster.LoadBalance）
+# 内容   = key=实现类全限定名
+# 选中方式：consumer 端 @DubboReference(loadbalance = "first") —— 用 key "first" 选它。
+first=com.lea.consumer.loadbalance.FirstLoadBalance
