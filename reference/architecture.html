@@ -89,6 +89,24 @@
 @DubboReference    → ReferenceConfig          → 代理(ProxyFactory) → InvokerInvocationHandler → Invoker 链 → 通信</code></pre>
   <p>区别在代理背后：OpenFeign 直接拼 HTTP；Dubbo 走 <code>Invoker 链 → Cluster → LoadBalance → Protocol → Remoting</code>。记住这条对应，将来读 <code>InvokerInvocationHandler</code> 就不会陌生。</p></div>
 
+  <h2>负载均衡在哪一侧？客户端 LB vs 服务端 LB</h2>
+  <p>Dubbo 的 <code>LoadBalance</code>（Cluster 层）跑在 <strong>consumer 侧</strong>——这是「客户端负载均衡」。两种范式先分清：</p>
+  <table class="grid">
+    <tr><th></th><th>客户端 LB（Dubbo / gRPC / SC LoadBalancer）</th><th>服务端 LB（Nginx / 硬件 LB / 网关）</th></tr>
+    <tr><td>谁挑后端</td><td>consumer 自己挑</td><td>挡在后端前的代理挑</td></tr>
+    <tr><td>调用链路</td><td>consumer → 直连选中的 provider（零额外跳）</td><td>client → 代理 → provider（多一跳）</td></tr>
+    <tr><td>地址列表</td><td>consumer 持有全部 provider 地址</td><td>代理持有；client 只认一个虚拟地址</td></tr>
+  </table>
+  <p><strong>为什么 Dubbo 选客户端 LB</strong>：内部高 QPS 调用受不了一跳的延迟与代理瓶颈；而且 consumer 本来就握着全部地址（客户端服务发现，为了 failover/重试也得握着），挑一个是顺手的事；还能做 LeastActive、一致性哈希等<strong>需要调用上下文</strong>的精细策略。</p>
+  <div class="callout key"><span class="c-label">本质：LB 永远在「调用方」那一侧</span><p>挑选需要两样东西——① 后端列表、② 调用上下文——只有调用方同时拥有；provider 连自己有哪些兄弟都不知道，没法挑。所以「服务端 LB」本质是「<strong>一个代理，它自己就是后端的调用方</strong>」。网关是后端的 caller、Nginx 是 upstream 的 caller、Dubbo consumer 是 provider 的 caller——<strong>所谓 server-side / client-side 只是它部署在哪儿，不是 LB 的本质</strong>。</p></div>
+  <h3>真正该分的线：流量方向</h3>
+  <table class="grid">
+    <tr><th></th><th>南北向（外部 → 进入集群）</th><th>东西向（集群内部 服务 ↔ 服务）</th></tr>
+    <tr><td>谁来干</td><td>网关：Spring Cloud Gateway / Nginx / Kong</td><td>Dubbo 客户端 LB（consumer 直连 provider）</td></tr>
+    <tr><td>职责</td><td>鉴权 / 限流 / TLS / 路由 + LB</td><td>在多 provider 间选一个 + failover / 重试</td></tr>
+  </table>
+  <p>两者<strong>并存不互斥</strong>：网关管入口（南北），客户端 LB 管内部互调（东西）。你不会在两个内部 Dubbo 服务之间塞个网关——每跳都加一跳，高 QPS 下不可接受。顺带这也是 Dubbo3 <code>Triple</code>（HTTP/2，兼容 gRPC）的价值：让 Dubbo 服务能被标准 HTTP 网关（SCG / Envoy）甚至浏览器直接打到，把「内部 RPC」和「入口网关」打通（老 <code>dubbo</code> 协议是 TCP 二进制，网关不好转）。</p>
+
   <div class="lesson-nav">
     <a href="glossary.html">← 术语表</a>
     <a href="../lessons/0001-what-is-dubbo-rpc-architecture.html">← 回到第 1 课</a>

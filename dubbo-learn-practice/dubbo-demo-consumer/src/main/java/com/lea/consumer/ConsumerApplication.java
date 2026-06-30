@@ -15,7 +15,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 @SpringBootApplication
 public class ConsumerApplication implements CommandLineRunner {
 
-    @DubboReference
+    @DubboReference(loadbalance = "first")
     private DemoService demoService;
 
     public static void main(String[] args) {
