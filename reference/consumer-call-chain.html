@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Consumer 调用全链路图鉴 · dubbo-learn</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/theme.js"></script>
+<script src="../assets/code.js" defer></script>
+</head>
+<body>
+<main>
+  <div class="lesson-kicker">参考文档 · Reference</div>
+  <h1 class="lesson-title">Consumer 调用全链路:从 proxy 到一次 RPC</h1>
+  <p class="lesson-sub">架构速查是「静态分层地图」,这页是「动态一次调用图鉴」——把 <code>demoService.sayHello()</code> 从代理对象到网络包的每一步钉死,辨清 Proxy / InvokerInvocationHandler / Invoker 三种角色,并说清它和 JDK 动态代理的关系。版本以 Dubbo 3.3.x 源码为准。</p>
+
+  <div class="lesson-meta">
+    <a href="architecture.html">← 架构速查(静态)</a>
+    <a href="source-reading-blueprint.html">攻读蓝图</a>
+    <a href="glossary.html">术语表</a>
+    <a href="../lessons/0004-spi-extensionloader.html">← 第 4 课</a>
+    <a href="https://github.com/apache/dubbo/blob/master/dubbo-rpc/dubbo-rpc-api/src/main/java/org/apache/dubbo/rpc/proxy/InvokerInvocationHandler.java" target="_blank" rel="noopener">官方源码 ↗</a>
+  </div>
+
+  <div class="callout key"><span class="c-label">一句话总记</span><p>一次远程调用 = <strong>1 个 <code>InvocationHandler</code></strong>(在代理边界把 <code>Method</code> 翻译成 <code>RpcInvocation</code>) + <strong>一条 <code>Invoker</code> 套娃链</strong>(每层 <code>invoke(Invocation)</code> 转发内层)。门面是 <code>InvokerInvocationHandler</code>,门面之后全是 <code>Invoker</code>。</p></div>
+
+  <h2>一图总览:一次调用的完整链路</h2>
+  <pre data-nocopy><code>demoService.sayHello("lea")              你调用的「业务接口」对象(其实是代理)
+      │   JDK/Javassist 代理把方法调用转发给它内部的 handler
+      ▼
+InvokerInvocationHandler.invoke(proxy, method, args)        &lt;── 全链唯一的 InvocationHandler
+      │   ① Object 方法(toString/hashCode/equals)在此短路,不下发
+      │   ② 否则:new RpcInvocation(method, args)
+      │      InvocationUtil.invoke(invoker, rpcInvocation)   invoker = Invoker 链的头
+      ▼ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 代理世界 → Invoker 世界的边界
+      ▼
+MockClusterInvoker.invoke(Invocation)                       &lt;── Invoker 链开始(全是 Invoker)
+      │   无 mock 配置 → this.invoker.invoke(invocation)     透传给内层
+      ▼
+[Consumer Filter 链: ConsumerContextFilter / MonitorFilter / FutureFilter / 你的自定义 Filter…]
+      │   每个 Filter 被包成一个 Invoker 节点,链式转发
+      ▼
+AbstractClusterInvoker.invoke(Invocation)                    FailoverClusterInvoker 继承它
+      │   ① list(invocation)      Directory 给出「路由后」的 provider Invoker 列表
+      │   ② initLoadBalance(...)  ★ getExtension("first") → 首次 new FirstLoadBalance(实例化日志)
+      │   ③ doInvoke(invocation, invokers, loadbalance)
+      ▼
+FailoverClusterInvoker.doInvoke(...)                         重试循环(retries,默认 2 次)
+      │   select(loadbalance, invocation, copyInvokers, invoked)
+      ▼
+AbstractClusterInvoker.doSelect(...)
+      │   invokers.size()==1 ? → return invokers.get(0)      【first.select 不调】
+      │   ≥2                  → loadbalance.select(...)      ★ FirstLoadBalance.select(select 日志)
+      ▼
+选中的 provider Invoker → invokeWithContext → Protocol → Remoting(Netty) → Provider</code></pre>
+  <p class="arch-caption">消费端这条链是「装饰器套娃」:每一层 <code>.invoke</code> 都把请求往内层传,直到真正的集群逻辑与网络发送。</p>
+
+  <h2>三种角色:Proxy / InvokerInvocationHandler / Invoker(链)</h2>
+  <p>最容易混淆的就是这三个。记住:代理 <strong>不是</strong> <code>Invoker</code>——代理实现的是<strong>业务接口</strong>,<code>Invoker</code> 是装在它肚子里那个 handler 里的。</p>
+  <table class="grid">
+    <tr><th>角色</th><th>implements</th><th>干什么</th><th>数量</th></tr>
+    <tr><td><strong>代理对象</strong> <code>demoService</code></td><td>业务接口(<code>DemoService</code>)+ <code>EchoService</code>/<code>Destroyable</code></td><td>用户看到的「本地方法」门面;让远程调用长得像本地调用</td><td>每个 <code>@DubboReference</code> 1 个</td></tr>
+    <tr><td><strong>InvokerInvocationHandler</strong></td><td><code>java.lang.reflect.InvocationHandler</code></td><td>边界适配器:<code>Method</code>→<code>RpcInvocation</code>;Object 方法短路;持有 1 个 <code>Invoker</code></td><td>每个代理 1 个(全链唯一那种)</td></tr>
+    <tr><td><strong>Invoker 链各节点</strong></td><td>Dubbo <code>Invoker&lt;T&gt;</code></td><td><code>invoke(Invocation)</code> 转发内层;承载 filter / cluster / loadbalance</td><td>一条链</td></tr>
+  </table>
+  <div class="callout key"><span class="c-label">is-a / has-a 记法</span><p>代理 <strong>is-a</strong> 业务接口;<code>InvokerInvocationHandler</code> <strong>has-a</strong> Invoker;Invoker 链每一层 <strong>is-a</strong> Invoker。三者是不同类型,<code>InvokerInvocationHandler</code> 是把它们粘起来的<strong>适配器</strong>。</p></div>
+  <p>这套设计背后的哲学:<strong>「一切皆 <code>Invoker</code>,<code>Invocation</code> 在一条 <code>Invoker</code> 链上流动」</strong>。代理负责「伪装成业务接口」(强类型、像调本地),Invoker 链负责「统一管线」(可透明叠 filter/cluster/lb),handler 负责在两套形状之间翻译一次。</p>
+
+  <h2>两个 <code>invoke</code> 别混</h2>
+  <table class="grid">
+    <tr><th></th><th><code>InvokerInvocationHandler.invoke</code></th><th><code>AbstractClusterInvoker.invoke</code></th></tr>
+    <tr><td>位置</td><td>代理边界(最外门面)</td><td>集群层入口(FailoverClusterInvoker 继承)</td></tr>
+    <tr><td>入参</td><td><code>(proxy, Method, args)</code> 反射三件套</td><td><code>(Invocation)</code> 统一调用对象</td></tr>
+    <tr><td>职责</td><td>翻译成 <code>RpcInvocation</code> + Object 方法短路 + 下发给 Invoker</td><td><code>list</code> 取地址 + <code>initLoadBalance</code> 取负载均衡 + 派发 <code>doInvoke</code></td></tr>
+  </table>
+
+  <h2>SPI 扩展在链路里何时被加载/使用(以 <code>first</code> LoadBalance 为例)</h2>
+  <p><code>first</code> 的「加载」和「使用」是链路上<strong>两个不同时刻</strong>,而且都发生在集群层内部——<strong>不经过</strong> <code>InvokerInvocationHandler</code>。</p>
+  <table class="grid">
+    <tr><th></th><th>位置</th><th>触发条件</th></tr>
+    <tr><td><strong>加载(实例化)</strong></td><td><code>AbstractClusterInvoker.invoke</code> 的 <code>initLoadBalance</code></td><td>每次调用前都跑;首次触发 <code>getExtension("first") → new FirstLoadBalance</code>(你的实例化日志)。之后走缓存</td></tr>
+    <tr><td><strong>使用(select)</strong></td><td><code>doInvoke → select → doSelect</code></td><td>受 <code>size()==1</code> 短路影响:<strong>单 provider 不调</strong> <code>select</code>;≥2 个才调</td></tr>
+  </table>
+  <p><code>getExtension("first")</code> 命中缓存就直接返回;首次访问走 <code>createExtension</code>,三步:</p>
+  <pre><code>private T createExtension(String name, boolean wrap) {
+    Class&lt;?&gt; clazz = getExtensionClasses().get(name);     // ① 按名找类(首次触发读 SPI 配置)
+    T instance = extensionInstances.get(clazz);           //    反射 new(单例,按 Class 缓存)
+    if (instance == null) { ...; injectExtension(instance); }  // ② IOC:setter 注入别的扩展
+    if (wrap)
+        for (Class&lt;?&gt; wc : cachedWrapperClasses)         // ③ AOP:Wrapper 逐层包(Filter 链的由来)
+            instance = wc.getConstructor(type).newInstance(instance);
+    return instance;
+}</code></pre>
+  <div class="callout warn"><span class="c-label">单 provider 短路(高频踩坑)</span><p><code>AbstractClusterInvoker.doSelect</code> 对 <code>invokers.size()==1</code> 直接 <code>return invokers.get(0)</code>,<strong>不调</strong> <code>loadbalance.select</code>。所以单 provider 时你只看到「实例化日志」、看不到「select 日志」——但 <code>initLoadBalance</code> 每次仍按 key 加载实例,足以证明扩展被选中。要看 <code>select</code> 真跑,起第 2 个 provider(覆盖 <code>dubbo.protocol.port</code>)。</p></div>
+
+  <h2>跟 JDK 动态代理的关系:复用 + 换芯(不是「重写」)</h2>
+  <p>严格说 Dubbo 没有「重写」JDK 动态代理,而是<strong>复用其模式、可替换其生成器</strong>:</p>
+  <ul>
+    <li><code>jdk</code> 工厂:<code>Proxy.newProxyInstance(loader, interfaces, new InvokerInvocationHandler(invoker))</code> —— <strong>直接用 JDK 的 <code>Proxy</code></strong>,handler 换成 Dubbo 的。</li>
+    <li><code>javassist</code> 工厂(<strong>默认</strong>):<code>Proxy.getProxy(interfaces).newInstance(new InvokerInvocationHandler(invoker))</code> —— 代理<strong>类</strong>用 Javassist 字节码生成,但<strong>派发照样落到同一个 <code>InvokerInvocationHandler</code></strong>。</li>
+  </ul>
+  <p>选哪个由 <code>ProxyFactory</code> 这个 SPI 决定(<code>@SPI("javassist") + @Adaptive(proxy)</code>)——「换代理实现 = 换 <code>proxy</code> 这个 SPI key」,和换 LoadBalance 是同一机制。</p>
+  <table class="grid">
+    <tr><th></th><th>你手写的 JDK 动态代理</th><th>Dubbo consumer 代理</th></tr>
+    <tr><td>代理怎么生成</td><td><code>Proxy.newProxyInstance</code></td><td><code>ProxyFactory.getProxy</code>(jdk 同 JDK;javassist 字节码)</td></tr>
+    <tr><td>handler</td><td>你的 lambda(<code>InvocationHandler</code>)</td><td><code>InvokerInvocationHandler</code>(也是 <code>InvocationHandler</code>)</td></tr>
+    <tr><td>handler 里「真正干活」</td><td><code>method.invoke(new HelloImpl(), args)</code> 本地反射</td><td><code>invoker.invoke(new RpcInvocation(...))</code> → Invoker 链 → 网络 RPC</td></tr>
+    <tr><td>Object 方法</td><td>不处理(toString 也走 handler)</td><td>短路(不发 RPC)</td></tr>
+    <tr><td>持有的「真实目标」</td><td><code>new HelloImpl()</code>(本地实现)</td><td><code>Invoker</code> 链(通往远端 Provider)</td></tr>
+  </table>
+  <div class="callout key"><span class="c-label">点睛</span><p>Dubbo 的 consumer 代理 = 你的 JDK 动态代理,只是把 handler 里那行 <code>method.invoke(真实对象)</code> 从「本地反射调真实对象」换成「交给 Invoker 链发一次 RPC」。代理骨架(<code>Proxy</code> + <code>InvocationHandler</code>)完全是 JDK 那套。</p></div>
+
+  <h2>自验证断点清单(按调用顺序)</h2>
+  <ol>
+    <li><code>InvokerInvocationHandler#invoke</code> —— 看它把 <code>Method</code> 转 <code>RpcInvocation</code> 后调 <code>invoker.invoke</code></li>
+    <li><code>MockClusterInvoker#invoke</code> —— 看 <code>this.invoker.invoke</code> 透传</li>
+    <li><code>AbstractClusterInvoker#invoke</code> —— 看 <code>initLoadBalance</code> 取出 <code>first</code>、再 <code>doInvoke</code></li>
+    <li><code>FailoverClusterInvoker#doInvoke</code> —— 看重试循环里的 <code>select(...)</code></li>
+    <li><code>AbstractClusterInvoker#doSelect</code> —— 看 <code>size()==1</code> 短路 / <code>loadbalance.select</code></li>
+  </ol>
+  <p>真正用上 <code>first</code> 的是 <strong>step 3(加载)</strong> 和 <strong>step 5(select)</strong>;step 1/2 只是「把请求往里传」。</p>
+
+  <h2>源码坐标</h2>
+  <table class="grid">
+    <tr><th>角色 / 环节</th><th>源码位置(apache/dubbo)</th></tr>
+    <tr><td>代理入口 handler</td><td><code>dubbo-rpc-api/.../rpc/proxy/InvokerInvocationHandler.java</code></td></tr>
+    <tr><td>代理工厂(SPI)</td><td><code>.../rpc/proxy/jdk/JdkProxyFactory.java</code>、<code>.../rpc/proxy/javassist/JavassistProxyFactory.java</code></td></tr>
+    <tr><td>集群层调用入口</td><td><code>dubbo-cluster/.../cluster/support/AbstractClusterInvoker.java</code>(<code>invoke</code> / <code>initLoadBalance</code> / <code>doSelect</code>)</td></tr>
+    <tr><td>Failover 容错</td><td><code>.../cluster/support/FailoverClusterInvoker.java</code>(<code>doInvoke</code>)</td></tr>
+    <tr><td>Cluster SPI + Wrapper</td><td><code>.../cluster/support/FailoverCluster.java</code>、<code>.../support/wrapper/MockClusterWrapper.java</code>、<code>MockClusterInvoker.java</code></td></tr>
+    <tr><td>SPI 加载器</td><td><code>dubbo-common/.../common/extension/ExtensionLoader.java</code>(<code>getExtension</code> / <code>createExtension</code>)</td></tr>
+    <tr><td>负载均衡接口</td><td><code>dubbo-cluster/.../cluster/LoadBalance.java</code>(<code>@SPI("random") + @Adaptive("loadbalance")</code>)</td></tr>
+  </table>
+  <div class="callout note"><span class="c-label">还差哪块</span><p>这条 Invoker 链是<strong>谁、在哪一步组装出来</strong>的——即 <code>ReferenceConfig#get</code>(服务引用)里 <code>cluster.join(directory)</code> → <code>ProxyFactory.getProxy</code> 的过程——是第 5 课「服务引用源码」的内容。本页只覆盖「链路怎么走」,不覆盖「链路怎么搭」。</p></div>
+
+  <div class="lesson-nav">
+    <a href="architecture.html">← 架构速查</a>
+    <a href="../lessons/0004-spi-extensionloader.html">← 回到第 4 课</a>
+  </div>
+</main>
+</body>
+</html>

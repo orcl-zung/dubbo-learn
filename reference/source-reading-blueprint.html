@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dubbo 源码攻读蓝图 · dubbo-learn</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/theme.js"></script>
+<script src="../assets/code.js" defer></script>
+</head>
+<body>
+<main>
+  <div class="lesson-kicker">参考文档 · 攻读导航</div>
+  <h1 class="lesson-title">Dubbo 源码攻读蓝图</h1>
+  <p class="lesson-sub">不是特性清单,是一根线——以「一次远程调用的往返」为轴,把要读的源码排成站点;标清主路 / 支线、每站的新机制、值得停下来品的设计。把 MISSION 的 4 阶段拧成一根可执行的线。</p>
+
+  <div class="lesson-meta">
+    <a href="architecture.html">← 架构速查(静态)</a>
+    <a href="consumer-call-chain.html">← 调用全链路(动态)</a>
+    <a href="../MISSION.md">使命</a>
+    <a href="../lessons/0004-spi-extensionloader.html">← 第 4 课</a>
+  </div>
+
+  <div class="callout key"><span class="c-label">一句话读法</span><p>拽住「一次调用:consumer 发起 → 跨网络 → provider 执行 → 结果返回」这根线,只读线碰到的东西。其余都是支线,先不读。<strong>线程驱动,不是特性驱动</strong>——这是攻读 Dubbo 唯一能活下来的姿势。</p></div>
+
+  <h2>读法哲学(为什么是这形状)</h2>
+  <ul>
+    <li><strong>别做特性清单</strong>:Dubbo 15+ 模块组、几十个 jar,逐特性介绍 = 广度优先旅游,读到第 6 个前面全忘,且分不清谁跟"一次调用"有关。</li>
+    <li><strong>一根线</strong>:一次调用的往返。所有源码只按"它在这根线上吗"取舍。</li>
+    <li><strong>主路 vs 支线</strong>(不是"重要 / 不重要"):主路 = 回答"一次调用怎么完成"必须读的;支线 = 治理 / 性能 / 边缘特性,先划掉。</li>
+    <li><strong>往返镜像</strong>:同一批层 consumer 编码 / provider 解码互为倒影。按往返读,对称性自动 pop——provider 不单独开课,作为 consumer 的倒影来读。</li>
+  </ul>
+  <div class="callout note"><span class="c-label">你已经比课时号靠前</span><p>前几轮的深挖已戳穿:SPI / ExtensionLoader、proxy / ProxyFactory、Cluster、LoadBalance、Filter、<code>Invoker</code> 抽象。蓝图从你现在站的地方起笔,不重走 1–4 课。</p></div>
+
+  <h2>主线站点图(一次调用的往返)</h2>
+  <p>图例:<strong>✅</strong> 已通透 &nbsp; <strong>🟡</strong> 碰过、待深化 &nbsp; <strong>⬜</strong> 未读 &nbsp; <strong>★</strong> 设计精妙、要停下来品</p>
+
+  <h3>去程 · consumer 发起</h3>
+  <table class="grid">
+    <tr><th>站</th><th>这站你新认识什么</th><th>精妙处</th><th>状态</th></tr>
+    <tr><td><strong>A. 代理入口</strong></td><td>proxy → <code>InvokerInvocationHandler</code> → Invoker 链;Object 方法短路</td><td>★ <code>Invoker</code>/<code>Invocation</code> 单一抽象</td><td>✅ <a href="consumer-call-chain.html">图鉴</a></td></tr>
+    <tr><td><strong>B. 服务引用</strong> <code>ReferenceConfig#get</code></td><td>这条 Invoker 链<strong>是谁搭的</strong>:registry → directory → cluster.join → filter → proxy</td><td>—</td><td>⬜</td></tr>
+    <tr><td><strong>C. 服务发现 / Directory</strong></td><td>地址列表哪来、怎么刷新;接口级(2.x) vs 应用级(3.x);3.x 迁移</td><td>★ 服务发现演进 + 迁移兼容机制</td><td>🟡</td></tr>
+    <tr><td><strong>D. 路由 Router</strong></td><td>负载均衡前再筛一遍(条件 / 标签路由)</td><td>—</td><td>⬜(轻读)</td></tr>
+    <tr><td><strong>E. Cluster + LoadBalance</strong></td><td>Failover 重试循环;<code>doSelect</code>;<code>@Adaptive</code> 选 LB</td><td>★ SPI 三件套;多策略共用 <code>AbstractClusterInvoker</code> 骨架</td><td>🟡 <a href="../lessons/0004-spi-extensionloader.html">第 4 课</a></td></tr>
+    <tr><td><strong>F. 上线 Remoting</strong></td><td>选中的 Invoker 怎么把 Invocation 变字节、过 Netty 发出去:<code>Protocol → Exchange → Transport → Serialize</code></td><td>★ Remoting 三层解耦;异步内核</td><td>⬜ 最大黑盒</td></tr>
+  </table>
+
+  <h3>provider 侧(去程的镜像)</h3>
+  <table class="grid">
+    <tr><th>站</th><th>这站你新认识什么</th><th>精妙处</th><th>状态</th></tr>
+    <tr><td><strong>G. 服务暴露</strong> <code>ServiceConfig#export</code></td><td>开端口、注册——B 的对偶</td><td>★ <code>ProxyFactory</code> 双向对称</td><td>⬜</td></tr>
+    <tr><td><strong>H. 入站处理</strong></td><td>字节到 → 解码 → Invocation → provider filter 链 → 真实方法(F 的镜像)</td><td>★ 同一套 Invoker 抽象两端复用</td><td>⬜</td></tr>
+    <tr><td><strong>I. provider <code>getInvoker</code></strong></td><td><code>DemoServiceImpl</code> 怎么被包成 Invoker</td><td><code>ProxyFactory.getInvoker</code> 反方向</td><td>🟡</td></tr>
+  </table>
+
+  <h3>回程 · 结果返回</h3>
+  <table class="grid">
+    <tr><th>站</th><th>这站你新认识什么</th><th>精妙处</th><th>状态</th></tr>
+    <tr><td><strong>J. 结果返回</strong></td><td>编码响应、consumer 解码、异步 → 同步(<code>Future</code>)</td><td>★ 异步内核 + 同步外壳</td><td>⬜</td></tr>
+  </table>
+  <div class="callout warn"><span class="c-label">最高 payoff 在 F</span><p>站 F(上线 Remoting)是 Dubbo 作为 RPC 框架最硬核、也是你目前最大的黑盒——调用到底怎么真的从 consumer 跨到 provider。概念最密,但也最值钱。这是大菜。</p></div>
+
+  <h2>值得停下来品的设计(精妙榜)</h2>
+  <p>不是一堆酷技巧,是少数几个深思想。按值得品的程度:</p>
+  <h3>Top 3</h3>
+  <table class="grid">
+    <tr><th>设计</th><th>为什么精妙</th><th>在哪品</th></tr>
+    <tr><td><strong>SPI 三件套</strong>:<code>@SPI</code> + <code>@Adaptive</code> + URL 总线</td><td>元设计。换协议 / 注册中心 / LB / 序列化 = 换一个 URL 参数指向的扩展,框架代码零改动</td><td>站 E / 第 4 课</td></tr>
+    <tr><td><strong><code>Invoker</code> / <code>Invocation</code> 单一抽象</strong></td><td>一切皆 Invoker、无限套娃;consumer 与 provider 用<strong>同一套</strong>抽象</td><td>站 A / 图鉴</td></tr>
+    <tr><td><strong>异步内核 + 同步外壳</strong></td><td>你写的同步 <code>sayHello()</code>,底层全 Future / 回调;<code>RpcContext</code> 把"当前调用"做成线程上下文贯穿全链</td><td>站 F / J</td></tr>
+  </table>
+  <h3>强候选</h3>
+  <ul>
+    <li><strong>Remoting 三层解耦</strong>(Exchange 请求-响应语义 / Transport 抽象 NIO / Serialize)——把"网络"层层脱到只剩"发请求等响应"。</li>
+    <li><strong>服务发现 接口级→应用级 + 迁移兼容</strong>——精妙在<strong>怎么平滑迁</strong>,不只是改了。</li>
+    <li><strong><code>ProxyFactory</code> 双向对称</strong>:<code>getProxy</code>(Invoker→代理) vs <code>getInvoker</code>(实例→Invoker),一个 SPI 两方向。</li>
+    <li><strong>Triple = HTTP/2 + Protobuf + gRPC 兼容</strong>——打通"内部 RPC"与"标准 HTTP 网关"的战略设计。</li>
+  </ul>
+
+  <h2>支线(先明确划掉,保住最近发展区)</h2>
+  <p>这些<strong>知道在哪、知道是 SPI 即可</strong>,不逐行读。等主线走完再按兴趣回填。</p>
+  <table class="grid">
+    <tr><th>类别</th><th>具体</th><th>怎么处理</th></tr>
+    <tr><td>治理控制面</td><td>配置中心 / 元数据中心 / Admin 内部</td><td>知道 hook 点即可</td></tr>
+    <tr><td>可观测</td><td>Metrics / Tracing 内部实现</td><td>知道埋点位置即可</td></tr>
+    <tr><td>边缘能力</td><td>Mesh / Istio、AOT / Native image</td><td>out of scope(MISSION 已划)</td></tr>
+    <tr><td>小众协议 / 序列化</td><td>thrift / redis / hessian 等协议、各种序列化</td><td>都是 SPI;读你用的(dubbo 协议 + fastjson2/hessian2),其余类比</td></tr>
+    <tr><td>路由冷门子集</td><td>脚本路由等</td><td>知道在哪即可</td></tr>
+    <tr><td>注册中心逐实现</td><td>ZK / Nacos / Etcd 内部</td><td>读一个(你用的 Nacos),其余类比</td></tr>
+    <tr><td>历史噪音</td><td>2.x 兼容的 compact 工具类</td><td>直接跳过</td></tr>
+  </table>
+
+  <h2>建议路线(一步一步)</h2>
+  <p>主线剩两块大没读,我的默认顺序是 <strong>先搭链子,再过网络</strong>(你也可以反过来):</p>
+  <table class="grid">
+    <tr><th>步</th><th>读什么</th><th>回答的问题</th></tr>
+    <tr><td><strong>第 5 课(站 B + G)</strong></td><td>服务引用 <code>refer</code> + 服务暴露 <code>export</code></td><td>这条 Invoker 链是谁、哪步搭的、端口何时开、何时注册——<strong>补上你一直撞的洞</strong>,consumer 侧闭环</td></tr>
+    <tr><td><strong>第 6 课起(站 F + H + J)</strong></td><td>Protocol / Exchange / Transport / Serialize,往返 + 结果回传</td><td>调用怎么真的跨网络——<strong>最大 payoff 的硬核部分</strong></td></tr>
+    <tr><td><strong>深化(站 C / D / E)</strong></td><td>服务发现演进、路由、集群容错各策略</td><td>把主线两侧的治理能力补齐</td></tr>
+    <tr><td><strong>阶段四</strong></td><td>参数调优 + 线上问题定位(超时 / 地址找不到 / 无限重试)</td><td>把源码理解兑现成排障能力(MISSION 成功标准之一)</td></tr>
+  </table>
+  <div class="callout note"><span class="c-label">这是份活文档</span><p>每攻完一站,回来把 <strong>⬜ → ✅</strong> 钉上,并补一个对应课时或参考页链接。进度一目了然,也方便决定下一站。</p></div>
+
+  <div class="lesson-nav">
+    <a href="consumer-call-chain.html">← 调用全链路(动态)</a>
+    <a href="architecture.html">架构速查(静态) →</a>
+  </div>
+</main>
+</body>
+</html>
