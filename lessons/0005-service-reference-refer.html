@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第 5 课：服务引用 refer —— 这条 Invoker 链是谁搭的 · dubbo-learn</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/theme.js"></script>
+<script src="../assets/quiz.js" defer></script>
+<script src="../assets/code.js" defer></script>
+</head>
+<body>
+<main>
+  <div class="lesson-kicker">第 5 课 · 阶段二 / 站 B</div>
+  <h1 class="lesson-title">服务引用 refer:这条 Invoker 链是谁搭的</h1>
+  <p class="lesson-sub">第 4 课你追了「一次调用<strong>怎么走</strong>」(inside-out);这节课补另一半——这条 Invoker 链是谁、在哪一步、按什么顺序<strong>搭起来的</strong>(outside-in)。答案就在 <code>@DubboReference</code> 背后的 <code>ReferenceConfig#get</code>。读完,consumer 侧闭环。</p>
+
+  <div class="lesson-meta">
+    <span>⏱ 约 25–35 分钟</span>
+    <a href="0004-spi-extensionloader.html">← 第 4 课</a>
+    <a href="../reference/consumer-call-chain.html">调用全链路(inside-out)</a>
+    <a href="../reference/source-reading-blueprint.html">攻读蓝图</a>
+  </div>
+
+  <div class="callout key"><span class="c-label">本课的 tangible win</span><p>能徒手画出两幅图并说清它们的关系:</p>
+  <ul>
+    <li><strong>装配链(refer 期,outside-in)</strong>:<code>DubboInvoker</code> → 实例 filter → <code>RegistryDirectory</code> → <code>cluster.join</code> → ClusterFilter → <code>MockClusterInvoker</code> → <code>getProxy</code></li>
+    <li><strong>调用链(第 4 课,inside-out)</strong>:proxy → <code>InvokerInvocationHandler</code> → <code>MockClusterInvoker</code> → … → <code>DubboInvoker</code> → 网络</li>
+  </ul>
+  <p>两条链是<strong>同一根链的正反两面</strong>——这是本课的「啊哈」。</p></div>
+
+  <div class="callout note"><span class="c-label">先定位:refer 是「搭链子」,不是「走链子」</span><p>一次 Dubbo 调用分两段:<strong>装配期</strong>(refer,<code>@DubboReference</code> 时把链搭好)和<strong>调用期</strong>(你调 <code>sayHello</code> 时在链上走)。第 4 课讲调用期,本课讲装配期。下节课的 <code>export</code> 是 refer 在 provider 侧的镜像。别把「搭」和「走」混了。</p></div>
+
+  <h2>Part A · 入口:从 <code>@DubboReference</code> 到 <code>ReferenceConfig#get</code></h2>
+  <p>你写的 <code>@DubboReference DemoService demoService</code>,Spring 启动时由 <code>ReferenceAnnotationBeanPostProcessor</code> 处理,为它建一个 <code>ReferenceConfig</code>(或从 <code>ReferenceConfigCache</code> 取)。真正的装配<strong>是懒加载</strong>的——<code>ReferenceConfig#get</code> 第一次被调用(<code>ref == null</code>)时才发生:</p>
+  <pre><code>// ReferenceConfig.java
+public T get(boolean check) {
+    if (destroyed) throw ...;
+    if (ref == null) {
+        ...getScopeModel().getDeployer().start();   // 确保模块启动
+        init(check);                                 // ★ 首次 get 才真正装配
+    }
+    return ref;
+}
+
+protected void init(boolean check) {
+    ...refresh 配置、建 ConsumerModel 并注册...
+    ref = createProxy(referenceParameters);          // ★ 装配主干
+    ...
+    if (check) checkInvokerAvailable(0);             // check=true 时校验有无 provider
+    initialized = true;
+}</code></pre>
+  <div class="callout warn"><span class="c-label">所以「什么时候搭链子」</span><p>不是 Spring 启动那一瞬,而是 <code>ReferenceConfig#get</code> 首次调用时——通常就是代理注入完成、你第一次(或启动校验时)碰到它的那一刻。<code>check</code> 默认 <code>true</code>,所以装配完会立刻校验「有没有 provider」,没有就抛 <code>No provider available</code>(第 2 课那个头号报错的源头之一)。</p></div>
+
+  <h2>Part B · 装配主干:<code>createProxy → createInvoker → refer</code></h2>
+  <p><code>init</code> 调 <code>createProxy</code>,它做两件事:先把 invoker 建出来,再用 invoker 建代理:</p>
+  <pre><code>private T createProxy(Map&lt;String,String&gt; referenceParameters) {
+    ...
+    if (StringUtils.isNotEmpty(url)) parseUrl(...);        // 点对点直连 url
+    else aggregateUrlFromRegistry(...);                     // 从注册中心拼 URL(常态)
+    createInvoker();                                        // ★ 建 this.invoker
+    ...
+    // ★ 用 invoker 造代理
+    return (T) proxyFactory.getProxy(invoker, ProtocolUtils.isGeneric(generic));
+}</code></pre>
+  <p><code>createInvoker</code> 按 URL 类型分两条路(这是理解装配的关键分叉):</p>
+  <pre><code>private void createInvoker() {
+    if (urls.size() == 1) {
+        URL curUrl = urls.get(0);
+        // ★ registry 场景:refer 返回的【已经是集群包装好的 invoker】
+        invoker = protocolSPI.refer(interfaceClass, curUrl);
+        if (!UrlUtils.isRegistry(curUrl)
+                && !curUrl.getParameter(UNLOAD_CLUSTER_RELATED, false)) {
+            // 只有【直连 URL】才需要这里再包一层 cluster + StaticDirectory
+            invoker = Cluster.getCluster(getScopeModel(), Cluster.DEFAULT)
+                    .join(new StaticDirectory(curUrl, List.of(invoker)), true);
+        }
+    } else {
+        // 多注册中心:每个 refer,再用 ZoneAwareCluster.join(StaticDirectory([invokers])) 汇总
+        ...
+    }
+}</code></pre>
+  <div class="callout key"><span class="c-label">读出这层的潜台词</span><p>registry 场景下 <code>createInvoker</code> <strong>没有再调 <code>cluster.join</code></strong>(注意 <code>!isRegistry</code> 守卫)——说明 <code>protocolSPI.refer(registryUrl)</code> 返回的那个 invoker,<strong>自身就已经是集群包装好的</strong>。也就是说,<code>cluster.join(directory)</code> 发生在 <code>refer</code> 内部。下一节我们就钻进去看。</p></div>
+
+  <h2>Part C · 钻进 <code>RegistryProtocol.refer</code>:directory + cluster.join</h2>
+  <p><code>protocolSPI</code> 是自适应的 <code>Protocol</code>。对 <code>registry://</code> URL,它派发到 <code>RegistryProtocol</code>(继承 <code>InterfaceCompatibleRegistryProtocol</code>)。<code>RegistryProtocol.refer</code>(<code>doRefer</code>)做三件事——这是站 B 的心脏:</p>
+  <pre data-nocopy><code>RegistryProtocol.doRefer(interface, registryUrl)
+   │
+   ├─① new RegistryDirectory(interface, registryUrl)        一个「动态目录」,持有当前所有 provider 的 Invoker
+   │
+   ├─② directory.subscribe(url)
+   │       └─ 注册中心 notify(provider URLs) → directory 刷新 Invoker 列表:
+   │            每个 provider URL → 真正的 protocol.refer  →  DubboInvoker(发起网络的那个)
+   │            每个DubboInvoker 被 ProtocolFilterWrapper 包上【实例级 filter 链】(你的 TimingFilter 挂这)
+   │
+   └─③ cluster.join(directory)
+           └─ 把 directory 包成 ClusterInvoker:
+                ClusterFilter 链(pre-LB)+ FailoverClusterInvoker(directory)
+                外层再套 MockClusterWrapper → MockClusterInvoker
+   │
+   └─ return 这个【集群 invoker】给 createInvoker</code></pre>
+  <p>这里每一步你在前几课都见过,现在它们被串成了一条<strong>装配流水线</strong>:</p>
+  <ul>
+    <li><strong><code>DubboInvoker</code></strong>:每个 provider 地址一个,真正发网络(细节留到站 F)。</li>
+    <li><strong>实例 filter 链</strong>:由 <code>ProtocolFilterWrapper.refer</code> 用 <code>buildInvokerChain(..., REFERENCE_FILTER_KEY, CONSUMER)</code> 包在每个 <code>DubboInvoker</code> 外——你第 4 课 Part D 写的 <code>TimingFilter</code>(<code>@Activate(group=CONSUMER)</code> 的 <code>Filter</code>)就注册在这。</li>
+    <li><strong><code>cluster.join</code></strong>:第 4 课读过——<code>AbstractCluster.join</code> = <code>buildClusterInterceptors(doJoin(directory))</code>,<code>doJoin</code> 出 <code>FailoverClusterInvoker</code>,外面叠 <strong>ClusterFilter 链</strong>(pre-LB,<code>ClusterFilterInvoker</code>)。</li>
+    <li><strong><code>MockClusterWrapper</code></strong>:<code>Cluster</code> SPI 的 Wrapper,再套一层 <code>MockClusterInvoker</code> 处理 mock——这正是第 4 课调用链最外层那个 <code>MockClusterInvoker</code> 的来源。</li>
+  </ul>
+
+  <h2>Part D · 收口:<code>proxyFactory.getProxy</code></h2>
+  <p>回到 <code>createProxy</code> 最后一行:<code>proxyFactory.getProxy(invoker)</code>(默认 Javassist)生成代理,handler = <code>new InvokerInvocationHandler(invoker)</code>。</p>
+  <div class="callout key"><span class="c-label">闭环到第 4 课</span><p>第 4 课你读过的 <code>InvokerInvocationHandler</code>,它那个 <code>private final Invoker&lt;?&gt; invoker</code> 字段——<strong>装的就是这一节 <code>createInvoker</code> 搭出来的那整串集群 invoker</strong>(<code>MockClusterInvoker → ClusterFilter → FailoverClusterInvoker → directory → 实例filter → DubboInvoker</code>)。装配端塞进去什么,调用端就从什么开始走。两节课在此刻接上。</p></div>
+  <p>至此 <code>ref = 代理</code>,注入到你的 <code>@DubboReference</code> 字段。装配结束。</p>
+
+  <h2>Part E · 啊哈:装配 outside-in ↔ 调用 inside-out</h2>
+  <p>把本课(装配)和第 4 课(调用)叠在一起看,会看到一根链的正反两面:</p>
+  <pre data-nocopy><code>【装配期 · refer · 从内往外搭(outside-in)】
+   DubboInvoker  ──包──►  实例 filter 链
+        └──装进──►  RegistryDirectory(动态,provider 变就刷新)
+                          └──cluster.join──►  ClusterFilter 链 + FailoverClusterInvoker
+                                                  └──MockClusterWrapper──►  MockClusterInvoker
+                                                                          └──getProxy──►  代理(InvokerInvocationHandler)
+
+【调用期 · sayHello · 从外往里走(inside-out,第 4 课)】
+   代理  ──►  InvokerInvocationHandler  ──►  MockClusterInvoker  ──►  ClusterFilter
+            ──►  FailoverClusterInvoker(doSelect 选 LB)  ──►  directory.list
+            ──►  实例 filter 链  ──►  DubboInvoker  ──►  网络</code></pre>
+  <div class="callout key"><span class="c-label">这就是 consumer 侧的完整闭环</span><p>装配期<strong>从内向外</strong>把 Invoker 一层层包好(先有 DubboInvoker,再有 directory,再 cluster.join,再 getProxy);调用期<strong>从外向内</strong>一层层调用进去。方向相反,链是同一条。看懂这张对照图,consumer 侧就彻底通了——从「这条链是谁搭的」到「一次调用怎么走」,首尾呼应。</p></div>
+
+  <h2>Part F · 点到为止:3.x 的两个「双」(深化留后面)</h2>
+  <h3>双服务发现模型(站 C 详讲)</h3>
+  <p>3.x 同时支持两套服务发现:</p>
+  <ul>
+    <li><strong>接口级</strong>(2.x 兼容):<code>RegistryProtocol</code> + <code>RegistryDirectory</code>,按接口订阅 provider URL。</li>
+    <li><strong>应用级</strong>(3.x 新):<code>ServiceDiscoveryRegistryDirectory</code>,消费应用级 <code>ServiceInstance</code> 数据,经 <code>InstanceAddressURL</code> 转成 Invoker。URL 用 <code>service-discovery-registry</code> 协议时走这条。</li>
+  </ul>
+  <p>本课为简洁以接口级为主线;应用级、以及两者如何<strong>迁移兼容</strong>(精妙处),留到站 C。</p>
+  <h3>双 consumer filter 链(呼应第 4 课 Part D)</h3>
+  <table class="grid">
+    <tr><th></th><th>ClusterFilter 链</th><th>实例 Filter 链</th></tr>
+    <tr><td>位置</td><td>负载均衡<strong>之前</strong></td><td>负载均衡<strong>之后</strong>,包每个 DubboInvoker</td></tr>
+    <tr><td>谁建</td><td><code>Cluster.join</code>(<code>buildClusterInterceptors</code>)</td><td><code>ProtocolFilterWrapper.refer</code>(<code>buildInvokerChain</code>)</td></tr>
+    <tr><td>注册文件</td><td><code>META-INF/dubbo/...ClusterFilter</code></td><td><code>META-INF/dubbo/...Filter</code></td></tr>
+    <tr><td>你的例子</td><td>—</td><td><code>TimingFilter</code>(<code>@Activate(CONSUMER)</code>)</td></tr>
+  </table>
+
+  <h2>本课练手</h2>
+  <div class="quiz" data-quiz='{"title":"第 5 课 · 检验","questions":[
+    {"q":"@DubboReference 的代理,真正装配(invoker 链搭建)发生在什么时候？","options":["Spring 启动那一刻","ReferenceConfig#get 首次调用时(懒加载)","第一次网络调用时","注册中心推送地址时"],"answer":1,"explain":"get() 里 ref==null 才 init→createProxy。通常即注入完成/启动校验时;check 默认 true,装配完就校验有无 provider。"},
+    {"q":"registry 场景下,protocolSPI.refer 返回的 invoker 是?","options":["单个 DubboInvoker","裸 RegistryDirectory","已 cluster.join 包装的集群 invoker","代理对象"],"answer":2,"explain":"createInvoker 对 registry URL 不再 join(!isRegistry 守卫),说明 RegistryProtocol.refer 内部已 cluster.join(directory),返回 MockClusterInvoker→ClusterFilter→Failover→directory 那一串。"},
+    {"q":"你写的 TimingFilter(@Activate CONSUMER 的 Filter)挂在哪条 filter 链?","options":["ClusterFilter 链(pre-LB)","实例 Filter 链(post-LB,包每个 DubboInvoker)","provider filter 链","不在链上"],"answer":1,"explain":"实例级 Filter 由 ProtocolFilterWrapper.refer 用 buildInvokerChain(...REFERENCE_FILTER_KEY, CONSUMER) 包在每个 DubboInvoker 外,在负载均衡选完之后执行。"},
+    {"q":"装配期与调用期的方向关系?","options":["都是 outside-in","都是 inside-out","装配 outside-in、调用 inside-out","两者无关"],"answer":2,"explain":"装配从内往外包(DubboInvoker→directory→cluster.join→getProxy);调用从外往里走(proxy→handler→…→DubboInvoker)。同一根链的正反面。"}
+  ]}'></div>
+
+  <div class="source-card">
+    <div class="sc-label">本课主源(官方 + 源码)</div>
+    <div class="sc-title"><a href="https://github.com/apache/dubbo/blob/master/dubbo-config/dubbo-config-api/src/main/java/org/apache/dubbo/config/ReferenceConfig.java" target="_blank" rel="noopener">ReferenceConfig.java</a> · <a href="https://github.com/apache/dubbo/blob/master/dubbo-registry/dubbo-registry-api/src/main/java/org/apache/dubbo/registry/RegistryProtocol.java" target="_blank" rel="noopener">RegistryProtocol.java</a></div>
+    <p class="sc-note">官方文档:<a href="https://zread.ai/apache/dubbo/18-registry-spi-and-service-discovery" target="_blank" rel="noopener">注册中心 SPI 与服务发现</a>、<a href="https://zread.ai/apache/dubbo/21-filter-chain-pipeline" target="_blank" rel="noopener">过滤器链流水线</a>(都基于 3.3 源码校验)。建议 IDE 下 sources jar 跟读,断点打在下面这几处。</p>
+  </div>
+
+  <h2>自己跟一遍(装配期断点,按顺序)</h2>
+  <ol>
+    <li><code>ReferenceConfig#get</code> → <code>init</code> → <code>createProxy</code> → <code>createInvoker</code>(看 <code>urls</code> 怎么来、<code>protocolSPI.refer</code> 被调)</li>
+    <li><code>RegistryProtocol#refer</code> / <code>doRefer</code>——看 <code>new RegistryDirectory</code>、<code>subscribe</code>、<code>cluster.join(directory)</code></li>
+    <li><code>AbstractCluster#join</code> → <code>doJoin</code>(出 FailoverClusterInvoker)+ <code>buildClusterInterceptors</code>(叠 ClusterFilter 链)</li>
+    <li><code>ProtocolFilterWrapper#refer</code>——看每个 DubboInvoker 被包上实例 filter 链</li>
+    <li><code>proxyFactory.getProxy</code> → <code>InvokerInvocationHandler</code> 构造器(看它吞进那串集群 invoker)</li>
+  </ol>
+  <p>开 dubbo debug 日志,还能看到装配期的 <code>Referred dubbo service: [com.lea.DemoService]</code>、订阅、notify 地址刷新。</p>
+
+  <h2>下一课预告</h2>
+  <p>consumer 侧闭环了。第 6 课攻 <strong>站 G:服务暴露 <code>export</code></strong>——<code>ServiceConfig#export</code> 是 refer 的 provider 镜像:开 Netty 端口、把服务 URL 注册进注册中心。把你第 2 课看到的那行 <code>Export dubbo service ... to registry</code> 背后的代码走通——「链怎么搭」的另一端也补上。</p>
+
+  <div class="lesson-ask">
+    💬 <strong>装配链概念密,随时打断。</strong>比如「<code>protocolSPI</code> 自适应怎么根据 URL 选 RegistryProtocol 还是 DubboProtocol」「<code>RegistryDirectory</code> 收到地址变更怎么刷新 Invoker 树」「实例 filter 和 ClusterFilter 我怎么决定写哪个」。能说清<strong>「装配 outside-in、调用 inside-out,同一根链」</strong>就通了。
+  </div>
+
+  <div class="lesson-nav">
+    <a href="0004-spi-extensionloader.html">← 第 4 课</a>
+    <a href="../reference/consumer-call-chain.html">调用全链路(inside-out) →</a>
+  </div>
+</main>
+</body>
+</html>
